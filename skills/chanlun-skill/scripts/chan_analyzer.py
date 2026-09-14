@@ -475,80 +475,56 @@ def _macd_area(obs: 观察者) -> dict:
 # ---------------------------------------------------------------------------
 # 结构化结果
 # ---------------------------------------------------------------------------
-def analyze(symbol: str, data: list, freq: str, config: 缠论配置 = None) -> dict:
-    """投喂数据并产出结构化结果。
+def analyze(symbol: str, data_by_period: dict, config: 缠论配置 = None) -> dict:
+    """分别对各周期直接投喂并产出结构化结果。
 
-    周期组必须长度 ≥2，否则 `立体分析器` 会触发 Rust 侧 PanicException。
-    - 常规：`[目标周期, 更大周期]`，走 `投喂K线` 自动合成大周期。
-    - 目标已是最大周期（month）：`[更小周期, month]`，直接对 month 观察者
-      `增加原始K线` 投喂（`投喂K线` 会校验周期 == 周期组最小值，month 无法作为
-      最小值投喂），更小周期作为占位留空。
+    data_by_period: {周期秒数: [K线行]}。每个周期用各自真实数据独立分析，
+    直接对观察者 `增加原始K线`（绕开 `立体分析器.投喂K线` 的增量式合成器）。
+
+    为什么绕开合成器：`投喂K线` 是增量式设计（逐根投喂、维护「当前K线」状态，
+    适合实时行情流式更新），会把最后一根 K 线留在 pending 状态不进序列。而本
+    工具是一次性批量分析历史数据，直接 `增加原始K线` 即可——无 pending、无需
+    flush、语义更清晰。
     """
-    seconds = period_to_seconds(freq)
-    up = upper_period(seconds)
-    is_max_period = (up == seconds)  # 无更大周期可补
+    seconds_list = sorted(data_by_period.keys())
+    if not seconds_list:
+        raise ValueError("无数据")
 
-    if is_max_period:
-        periods = [lower_period(seconds), seconds]
-    else:
-        periods = [seconds, up]
+    # 立体分析器仅作观察者容器，其周期组长度必须 ≥2（Rust 侧硬约束，单周期 panic）
+    periods = list(seconds_list)
+    if len(periods) < 2:
+        p0 = periods[0]
+        up = upper_period(p0)
+        if up != p0:
+            periods.append(up)
+        else:
+            periods.insert(0, lower_period(p0))
 
     cfg = config if config is not None else 缠论配置.不推送()
     engine = 立体分析器(symbol, periods, cfg)
 
-    if is_max_period:
-        # 直接对目标观察者投喂，绕过 投喂K线 的周期校验
-        target_obs = engine._单体分析器[seconds]
-        for i, row in enumerate(data):
+    # 分别投喂各周期（直接增加原始K线，无 pending）
+    for p in seconds_list:
+        obs = engine._单体分析器[p]
+        for i, row in enumerate(data_by_period[p]):
             ts = _parse_date(row["date"], i)
             k = K线.创建普K(
                 symbol, ts, row["open"], row["high"], row["low"], row["close"],
-                row["volume"], i, seconds,
+                row["volume"], i, p,
             )
-            target_obs.增加原始K线(k)
-    else:
-        for i, row in enumerate(data):
-            ts = _parse_date(row["date"], i)
-            k = K线.创建普K(
-                symbol, ts, row["open"], row["high"], row["low"], row["close"],
-                row["volume"], i, seconds,
-            )
-            try:
-                engine.投喂K线(k)
-            except BaseException:
-                # PanicException 继承 BaseException，这里兜底让错误可见而非静默崩
-                raise
+            obs.增加原始K线(k)
 
-        # flush 最后一根 pending K 线。核心库的 `投喂K线`（立体分析器合成器）
-        # 会把最后一根 K 线留在「当前K线」状态（未确认、不进序列），需投喂一根
-        # 下一周期的占位 K 线触发它完成进序列。占位 K 线自身成为新的 pending，
-        # 不会进入观察者序列、不污染结构/指标。month 模式（直接 `增加原始K线`）
-        # 无此问题，故仅在常规周期下 flush。
-        if data:
-            last = data[-1]
-            last_ts = _parse_date(last["date"], len(data) - 1)
-            flush_ts = last_ts + seconds
-            flush_k = K线.创建普K(
-                symbol, flush_ts,
-                last["close"], last["close"], last["close"], last["close"],
-                0, len(data), seconds,
-            )
-            engine.投喂K线(flush_k)
-
-    # 每个周期一个观察者（空周期会被过滤）
-    observers = {p: engine._单体分析器[p] for p in periods}
-
+    primary = min(seconds_list)
     result = {
         "symbol": symbol,
-        "freq": seconds_to_name(seconds),
-        "periods": [seconds_to_name(p) for p in periods],
-        "kline_count": len(data),
+        "freq": seconds_to_name(primary),
+        "periods": [seconds_to_name(p) for p in seconds_list],
+        "kline_count": len(data_by_period[primary]),
         "periods_detail": {},
     }
 
-    for p, obs in observers.items():
-        if len(obs.普通K线序列) == 0:
-            continue  # 占位周期无数据，跳过
+    for p in seconds_list:
+        obs = engine._单体分析器[p]
         name = seconds_to_name(p)
         detail = {
             "普通K线": len(obs.普通K线序列),
@@ -691,19 +667,32 @@ def main():
 
     args = parser.parse_args()
 
-    # 加载数据
+    # 解析目标周期
+    try:
+        freq_seconds = period_to_seconds(args.freq)
+    except ValueError as e:
+        print(f"错误：{e}", file=sys.stderr)
+        sys.exit(1)
+
+    # 加载数据（多周期：目标周期 + 上一级周期，用于跨级别共振判断）
     if args.source == "csv":
         if not args.input:
             print("错误：csv 模式需要 --input", file=sys.stderr)
             sys.exit(1)
-        data = load_csv_data(args.input)
+        data_by_period = {freq_seconds: load_csv_data(args.input)}
     else:
         if not args.code:
             print("错误：eltdx 模式需要 --code", file=sys.stderr)
             sys.exit(1)
-        data = load_eltdx_data(args.code, args.freq, args.start_date, args.end_date, args.count)
+        data_by_period = {}
+        up = upper_period(freq_seconds)
+        for p in sorted({freq_seconds, up}):
+            pname = seconds_to_name(p)
+            rows = load_eltdx_data(args.code, pname, args.start_date, args.end_date, args.count)
+            if len(rows) >= 2:
+                data_by_period[p] = rows
 
-    if len(data) < 2:
+    if not data_by_period:
         print("错误：数据不足（<2 根 K 线），无法分析", file=sys.stderr)
         sys.exit(1)
 
@@ -726,7 +715,7 @@ def main():
     # 分析
     symbol = args.symbol or (args.code if args.source == "eltdx" else "000001")
     try:
-        result = analyze(symbol, data, args.freq, config)
+        result = analyze(symbol, data_by_period, config)
     except ValueError as e:
         print(f"错误：{e}", file=sys.stderr)
         sys.exit(1)
