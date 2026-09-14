@@ -30,7 +30,7 @@ import argparse
 import csv
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from chanlun import K线, 立体分析器, 缠论配置, 观察者, 虚线, 笔, 线段, 中枢, 背驰分析
 
@@ -180,13 +180,17 @@ def load_eltdx_data(code: str, freq: str, start_date: str = None, end_date: str 
 # 取数：全部走核心库原生字段，不做二次推断
 # ---------------------------------------------------------------------------
 def _fmt_ts(ts) -> str:
-    """时间戳 -> 可读日期。核心库时间戳为 datetime 或 int。"""
+    """时间戳 -> 可读日期。
+
+    核心库（Rust 绑定）内部把时间戳对齐到 UTC 日边界（即北京时间 08:00），
+    因此这里必须用 UTC 时区反解，否则日期会整体偏移 +8 小时导致错位。
+    """
     if ts is None:
         return "-"
     try:
         if isinstance(ts, (int, float)):
-            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-        return datetime.fromtimestamp(int(ts)).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
     except (ValueError, OSError, OverflowError):
         return str(ts)
 
@@ -572,8 +576,15 @@ def analyze(symbol: str, data: list, freq: str, config: 缠论配置 = None) -> 
 
 
 def _parse_date(date_str: str, fallback: int) -> int:
+    """日期字符串 -> 秒级时间戳。
+
+    关键：核心库（Rust 绑定）把时间戳按 UTC 对齐到周期边界。若用本地时区
+    （北京时间）的 00:00 生成时间戳，会被向下对齐到「前一个 UTC 日」，导致
+    日期整体偏移 -1 天。因此这里用 UTC 00:00 生成时间戳（等价于本地时间戳 +8h）。
+    """
     try:
-        return int(datetime.strptime(date_str, "%Y-%m-%d").timestamp())
+        return int(datetime.strptime(date_str, "%Y-%m-%d")
+                   .replace(tzinfo=timezone.utc).timestamp())
     except (ValueError, TypeError):
         return fallback
 
