@@ -519,6 +519,22 @@ def analyze(symbol: str, data: list, freq: str, config: 缠论配置 = None) -> 
                 # PanicException 继承 BaseException，这里兜底让错误可见而非静默崩
                 raise
 
+        # flush 最后一根 pending K 线。核心库的 `投喂K线`（立体分析器合成器）
+        # 会把最后一根 K 线留在「当前K线」状态（未确认、不进序列），需投喂一根
+        # 下一周期的占位 K 线触发它完成进序列。占位 K 线自身成为新的 pending，
+        # 不会进入观察者序列、不污染结构/指标。month 模式（直接 `增加原始K线`）
+        # 无此问题，故仅在常规周期下 flush。
+        if data:
+            last = data[-1]
+            last_ts = _parse_date(last["date"], len(data) - 1)
+            flush_ts = last_ts + seconds
+            flush_k = K线.创建普K(
+                symbol, flush_ts,
+                last["close"], last["close"], last["close"], last["close"],
+                0, len(data), seconds,
+            )
+            engine.投喂K线(flush_k)
+
     # 每个周期一个观察者（空周期会被过滤）
     observers = {p: engine._单体分析器[p] for p in periods}
 
