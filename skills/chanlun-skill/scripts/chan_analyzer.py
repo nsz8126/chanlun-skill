@@ -279,7 +279,8 @@ def _classify_signals(obs: 观察者) -> list:
         T3B = 中枢在一类之前形成（突破老中枢 = 二三类重合）
 
     方向口径：向下笔终点（底分型）= 买；向上笔终点（顶分型）= 卖。
-    第三买卖线：向上离开中枢 = 三买；向下 = 三卖。
+    第三买卖线：按相对中枢的位置（缺口方向）判买/卖——在中枢上方 = 三买，
+    在中枢下方 = 三卖（注意不是第三买卖线自身的笔方向）。
     """
     signals = []
     trend = _trend_type(obs)
@@ -290,13 +291,14 @@ def _classify_signals(obs: 观察者) -> list:
         line = z.第三买卖线
         if line is None:
             continue
-        d = _dir_name(line.方向)
-        is_buy = d == "向上"  # 向上离开中枢后回踩不回 → 三买
-        hub_ts = _ts_val(z.武.时间戳)
-        if first_ts is not None and hub_ts < first_ts:
-            base = "T3B"  # 中枢在一类之前
+        # 第三买卖线相对中枢的位置（缺口方向），不是它自身的笔方向：
+        # 在中枢上方（向上缺口）= 三买；在中枢下方（向下缺口）= 三卖
+        is_buy = line.低 >= z.高
+        hub_start_ts = _ts_val(z.文.时间戳)  # 中枢起点分型时间戳（形成时序）
+        if first_ts is not None and hub_start_ts < first_ts:
+            base = "T3B"  # 中枢起点在一类之前 = 老中枢
         else:
-            base = "T3A"  # 中枢在一类之后（或无一类参考）
+            base = "T3A"  # 中枢起点在一类之后 = 新中枢（或无一类参考）
         reason_text = f"中枢#{z.序号} 第三买卖线（走势={trend}"
         if base == "T3B":
             reason_text += "，二三类重合"
@@ -305,7 +307,7 @@ def _classify_signals(obs: 观察者) -> list:
             "kind": base + ("买" if is_buy else "卖"),
             "base": "三买" if is_buy else "三卖",
             "index": line.序号,
-            "direction": d,
+            "direction": "向上" if is_buy else "向下",
             "high": line.高, "low": line.低,
             "break": z.高 if is_buy else z.低,  # 中枢上沿/下沿，回踩跌破即失效
             "reason": reason_text,

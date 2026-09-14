@@ -191,12 +191,10 @@ def main():
             kinds = [s["kind"] for s in det.get("买卖点", [])]
             hubs = det.get("中枢序列", [])
             has_t1 = any(k.startswith("T1") and not k.startswith("T1P") for k in kinds)
-            has_t3a = any(k.startswith("T3A") for k in kinds)
             has_2hub = len(hubs) >= 2
             check("≥2 个中枢（趋势结构）", has_2hub,
                   f"中枢数 {len(hubs)}")
             check("T1 趋势背驰触发", has_t1, f"买卖点 {kinds}")
-            check("T3A 三类 a 触发", has_t3a, f"买卖点 {kinds}")
         else:
             check("趋势数据（无法运行）", False, head(txt))
     else:
@@ -204,7 +202,30 @@ def main():
 
     print("")
     print("=" * 78)
-    print("PART 7  性能")
+    print("PART 7  T3A / T3B 时序验证（老中枢 vs 新中枢）")
+    print("=" * 78)
+    for label, csv_name, expect in (
+        ("T3B（突破老中枢=二三类重合）", "test_data_t3b.csv", "T3B"),
+        ("T3A（突破反转后新中枢）", "test_data_t3a.csv", "T3A"),
+    ):
+        fpath = os.path.join(HERE, csv_name)
+        if not os.path.exists(fpath):
+            check(f"{label}（缺失 {csv_name}）", False)
+            continue
+        code, txt = run(["--source", "csv", "--input", fpath,
+                         "--symbol", "000001", "--freq", "day", "--json"])
+        if code == 0:
+            d = json.loads(txt)
+            det = list(d["periods_detail"].values())[0]
+            kinds = [s["kind"] for s in det.get("买卖点", [])]
+            hit = any(k.startswith(expect) for k in kinds)
+            check(f"{label}", hit, f"买卖点 {kinds}")
+        else:
+            check(f"{label}（无法运行）", False, head(txt))
+
+    print("")
+    print("=" * 78)
+    print("PART 8  性能")
     print("=" * 78)
     t0 = time.time()
     code, txt = run(base + ["--freq", "day"])
