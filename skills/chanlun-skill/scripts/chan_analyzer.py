@@ -228,21 +228,28 @@ def _ts_val(ts) -> int:
 
 
 def _trend_type(obs: 观察者) -> str:
-    """走势类型判定：盘整 / 趋势。
+    """走势类型判定：盘整 / 趋势（上涨/下跌）。
 
-    缠论标准：≥2 个依次同向的中枢 = 趋势；0~1 个 = 盘整。
-    用中枢方向序列的最大连续同向长度判定。
+    缠论标准：≥2 个依次同向、区间无重叠的中枢 = 趋势；否则 = 盘整。
+    判据用「相邻中枢区间的位置关系」（依次上移/下移且无重叠），
+    而非中枢的「方向」字段（下跌趋势的中枢方向翻转后可能不一致）。
     """
-    dirs = [_dir_name(z.方向) for z in obs.笔_中枢序列]
-    max_same = 1
-    cur = 1
-    for i in range(1, len(dirs)):
-        if dirs[i] == dirs[i - 1]:
-            cur += 1
-            max_same = max(max_same, cur)
-        else:
-            cur = 1
-    return "趋势" if max_same >= 2 else "盘整"
+    hubs = obs.笔_中枢序列
+    if len(hubs) < 2:
+        return "盘整"
+    up = down = 0
+    for i in range(len(hubs) - 1):
+        z0, z1 = hubs[i], hubs[i + 1]
+        if z1.低 > z0.高:      # z1 整体在 z0 上方 → 上移
+            up += 1
+        elif z1.高 < z0.低:    # z1 整体在 z0 下方 → 下移
+            down += 1
+        # 否则区间重叠 = 中枢扩展（盘整）
+    if up >= 1 and down == 0:
+        return "趋势"
+    if down >= 1 and up == 0:
+        return "趋势"
+    return "盘整"
 
 
 def _inside_hub(obs: 观察者, price: float) -> bool:

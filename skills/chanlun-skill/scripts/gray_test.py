@@ -179,7 +179,32 @@ def main():
 
     print("")
     print("=" * 78)
-    print("PART 6  性能")
+    print("PART 6  趋势数据 T 系列验证（双中枢下跌 + 背驰）")
+    print("=" * 78)
+    trend_csv = os.path.join(HERE, "test_data_trend.csv")
+    if os.path.exists(trend_csv):
+        code, txt = run(["--source", "csv", "--input", trend_csv,
+                         "--symbol", "000001", "--freq", "day", "--json"])
+        if code == 0:
+            d = json.loads(txt)
+            det = list(d["periods_detail"].values())[0]
+            kinds = [s["kind"] for s in det.get("买卖点", [])]
+            hubs = det.get("中枢序列", [])
+            has_t1 = any(k.startswith("T1") and not k.startswith("T1P") for k in kinds)
+            has_t3a = any(k.startswith("T3A") for k in kinds)
+            has_2hub = len(hubs) >= 2
+            check("≥2 个中枢（趋势结构）", has_2hub,
+                  f"中枢数 {len(hubs)}")
+            check("T1 趋势背驰触发", has_t1, f"买卖点 {kinds}")
+            check("T3A 三类 a 触发", has_t3a, f"买卖点 {kinds}")
+        else:
+            check("趋势数据（无法运行）", False, head(txt))
+    else:
+        check("趋势数据（缺失 test_data_trend.csv）", False)
+
+    print("")
+    print("=" * 78)
+    print("PART 7  性能")
     print("=" * 78)
     t0 = time.time()
     code, txt = run(base + ["--freq", "day"])
