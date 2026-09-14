@@ -134,7 +134,7 @@ def main():
 
     print("")
     print("=" * 78)
-    print("PART 4  买卖点方向：向上→sell，向下→buy")
+    print("PART 4  买卖点方向：向上笔→卖类，向下笔→买类")
     print("=" * 78)
     code, txt = run(base + ["--freq", "day", "--json"])
     if code == 0:
@@ -143,8 +143,10 @@ def main():
         for pname, det in d["periods_detail"].items():
             for s in det["买卖点"]:
                 total_sig += 1
-                expect = "sell" if s["direction"] == "向上" else "buy"
-                if s["kind"] != expect:
+                is_buy = "买" in s["kind"]
+                is_sell = "卖" in s["kind"]
+                expect_buy = s["direction"] == "向下"
+                if (is_buy and not expect_buy) or (is_sell and expect_buy):
                     wrong += 1
         check(f"买卖点方向（{total_sig} 个）", wrong == 0, f"错 {wrong} 个")
     else:
@@ -152,7 +154,29 @@ def main():
 
     print("")
     print("=" * 78)
-    print("PART 5  性能")
+    print("PART 5  新增能力：买卖点类型 / MACD面积 / BOLL / 序列组")
+    print("=" * 78)
+    code, txt = run(base + ["--freq", "day", "--boll", "--均线", "5,20", "--json"])
+    if code == 0:
+        d = json.loads(txt)
+        det = list(d["periods_detail"].values())[0]
+        has_area = bool(det.get("MACD面积"))
+        has_boll = any(r.get("boll_mid") is not None for r in det.get("指标_最近", []))
+        has_ma = any(r.get("均线") for r in det.get("指标_最近", []))
+        has_groups = "线段序列组" in det and "扩展线段序列组" in det
+        has_sig_types = all("买" in s["kind"] or "卖" in s["kind"]
+                            for s in det.get("买卖点", []))
+        check("MACD 面积量", has_area)
+        check("BOLL 布林带", has_boll)
+        check("均线", has_ma)
+        check("级别递归序列组", has_groups)
+        check("买卖点类型化", has_sig_types)
+    else:
+        check("新增能力（无法运行）", False, head(txt))
+
+    print("")
+    print("=" * 78)
+    print("PART 6  性能")
     print("=" * 78)
     t0 = time.time()
     code, txt = run(base + ["--freq", "day"])

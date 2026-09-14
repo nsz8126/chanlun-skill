@@ -215,24 +215,39 @@ def _dir_name(d) -> str:
     return s
 
 
-def _buy_sell_info(obs: 观察者) -> list:
-    """从缠论K线序列中提取买卖点信息（核心库原生 `缠论K线.买卖点信息`）。"""
-    infos = []
-    for ck in obs.缠论K线序列:
-        info = getattr(ck, "买卖点信息", None)
-        if info is not None:
-            infos.append(info)
-    return infos
+def _classify_signals(obs: 观察者) -> list:
+    """识别一二三类买卖点（保守版，基于核心库明确语义）。
 
+    判据（对应缠论标准定义，全部取核心库已算好的字段，不做二次推断）：
+    - 三买/三卖：`中枢.第三买卖线` 非空 —— 核心库已算好的「离开中枢后
+      与中枢形成缺口（不回中枢）」的确认线。向上离开中枢 → 三买；向下 → 三卖。
+      破位值取中枢重叠区间的上沿(三买)/下沿(三卖)，回踩跌破即失效。
+    - 一买/一卖：具备 `虚线.买卖意义` 且 reason 含「背驰」—— 趋势背驰点。
+      破位值取该笔端点，跌破即失效。
+    - 二买/二卖：其余具备买卖意义的笔 —— 中枢震荡中的次级别买卖点。
 
-def _stroke_signals(obs: 观察者) -> list:
-    """基于核心库 `虚线.买卖意义` 提取具备买卖意义的笔级信号。
-
-    核心语义：买卖意义只返回「此处是否具备买卖意义 + 理由」。
-    方向判定：笔的方向（向上=顶分型终点→卖出语境，向下=底分型终点→买入语境）。
-    这是官方正确口径，不再用「向上=买」的反向推断。
+    说明：严格缠论的一二类买卖点需多级别递归，本实现是基于笔中枢的简化识别，
+    用核心库 `买卖意义`（背驰/极值/MACD 匹配）区分一类与二类，可作为初筛而非最终结论。
     """
     signals = []
+
+    # 三买/三卖：来自中枢第三买卖线
+    for z in obs.笔_中枢序列:
+        line = z.第三买卖线
+        if line is None:
+            continue
+        d = _dir_name(line.方向)
+        is_buy = d == "向上"  # 向上离开中枢后回踩不回 → 三买
+        signals.append({
+            "kind": "三买" if is_buy else "三卖",
+            "index": line.序号,
+            "direction": d,
+            "high": line.高, "low": line.低,
+            "break": z.高 if is_buy else z.低,  # 中枢上沿/下沿，回踩跌破即失效
+            "reason": f"中枢#{z.序号} 第三买卖线",
+        })
+
+    # 一/二类：来自具备买卖意义的笔
     for s in obs.笔序列:
         try:
             meaningful, reason = 虚线.买卖意义(s, obs)
@@ -240,17 +255,19 @@ def _stroke_signals(obs: 观察者) -> list:
             meaningful, reason = False, ""
         if not meaningful:
             continue
-        direction = s.方向
-        # 向上笔终点是顶分型 → 卖出语境；向下笔终点是底分型 → 买入语境
-        is_up = _dir_name(direction) == "向上"
+        d = _dir_name(s.方向)
+        is_buy = d == "向下"  # 向下笔终点是底分型 → 买点语境
+        is_first = "背驰" in reason  # 趋势背驰 → 一类
         signals.append({
-            "kind": "sell" if is_up else "buy",
+            "kind": ("一买" if is_buy else "一卖") if is_first else ("二买" if is_buy else "二卖"),
             "index": s.序号,
-            "high": s.高,
-            "low": s.低,
-            "direction": _dir_name(direction),
+            "direction": d,
+            "high": s.高, "low": s.低,
+            "break": s.低 if is_buy else s.高,  # 跌破/涨破端点即失效
             "reason": reason,
         })
+
+    signals.sort(key=lambda x: x["index"])
     return signals
 
 
@@ -273,7 +290,7 @@ def _divergences(obs: 观察者) -> list:
                 "direction": _dir_name(seg.方向),
                 "high": seg.高, "low": seg.低,
             })
-    # 相邻线段对之间的 MACD/斜率/测度背驰
+    # 相邻线段对之间的 MACD/斜率/测度/全量背驰
     segs = obs.线段序列
     for i in range(len(segs) - 1):
         a, b = segs[i], segs[i + 1]
@@ -284,6 +301,7 @@ def _divergences(obs: 观察者) -> list:
             ("MACD", lambda: 背驰分析.MACD背驰_OBS(a, b, obs)),
             ("斜率", lambda: 背驰分析.斜率背驰(a, b)),
             ("测度", lambda: 背驰分析.测度背驰(a, b)),
+            ("全量", lambda: 背驰分析.全量背驰_OBS(a, b, obs)),
         ):
             try:
                 if fn():
@@ -300,6 +318,16 @@ def _divergences(obs: 观察者) -> list:
     return results
 
 
+def _get_container(k, name):
+    """从 K 线指标容器取子指标，兼容 Rust 绑定（dict）与属性访问。"""
+    指标 = getattr(k, "指标", None)
+    if 指标 is None:
+        return None
+    if isinstance(指标, dict):
+        return 指标.get(name)
+    return getattr(指标, name, None)
+
+
 def _indicator_tail(obs: 观察者, n: int = 3) -> list:
     """提取最近 N 根 K 线的技术指标值（挂在 K 线上）。"""
     rows = []
@@ -307,6 +335,8 @@ def _indicator_tail(obs: 观察者, n: int = 3) -> list:
         macd = getattr(k, "macd", None)
         rsi = getattr(k, "rsi", None)
         kdj = getattr(k, "kdj", None)
+        boll = _get_container(k, "boll")
+        均线 = _get_container(k, "均线")
         rows.append({
             "time": _fmt_ts(k.时间戳),
             "close": k.收盘价,
@@ -317,8 +347,26 @@ def _indicator_tail(obs: 观察者, n: int = 3) -> list:
             "kdj_k": getattr(kdj, "K", None),
             "kdj_d": getattr(kdj, "D", None),
             "kdj_j": getattr(kdj, "J", None),
+            "boll_up": getattr(boll, "上轨", None),
+            "boll_mid": getattr(boll, "中轨", None),
+            "boll_low": getattr(boll, "下轨", None),
+            "均线": dict(均线) if isinstance(均线, dict) else None,
         })
     return rows
+
+
+def _macd_area(obs: 观察者) -> dict:
+    """用 `K线.获取MACD` 计算全序列 MACD 柱面积分向统计（量化背驰的原料）。
+
+    注意：该方法要求普 `K线` 序列（非缠论K线），且 `始`/`终` 是 K 线对象而非索引。
+    """
+    ks = obs.普通K线序列
+    if len(ks) < 2:
+        return {}
+    try:
+        return K线.获取MACD(ks, ks[0], ks[-1])
+    except BaseException:
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -408,8 +456,16 @@ def analyze(symbol: str, data: list, freq: str, config: 缠论配置 = None) -> 
              "状态": z.当前状态() if hasattr(z, "当前状态") else ""}
             for z in obs.笔_中枢序列[-5:]
         ]
-        detail["买卖点"] = _stroke_signals(obs)[-10:]
+        # 级别递归序列组（多级别结构，逐层展开计数）
+        detail["线段序列组"] = [len(g) for g in obs.线段序列组]
+        detail["中枢序列组"] = [len(g) for g in obs.中枢序列组]
+        detail["扩展线段序列组"] = [len(g) for g in obs.扩展线段序列组]
+        detail["扩展中枢序列组"] = [len(g) for g in obs.扩展中枢序列组]
+        detail["混合扩展线段序列组"] = [len(g) for g in obs.混合扩展线段序列组]
+        detail["混合扩展中枢序列组"] = [len(g) for g in obs.混合扩展中枢序列组]
+        detail["买卖点"] = _classify_signals(obs)[-10:]
         detail["背驰"] = _divergences(obs)[-10:]
+        detail["MACD面积"] = _macd_area(obs)
         detail["指标_最近"] = _indicator_tail(obs, 3)
         result["periods_detail"][name] = detail
 
@@ -451,21 +507,28 @@ def render_text(result: dict) -> str:
                 lines.append(f"    中枢#{z['序号']} 区间 [{z['低']:.2f} ~ {z['高']:.2f}] "
                              f"极值 [{z['低低']:.2f} ~ {z['高高']:.2f}] {z['状态']}")
         if d["买卖点"]:
-            lines.append("  买卖点（核心库 买卖意义）：")
+            lines.append("  买卖点：")
             for s in d["买卖点"]:
-                icon = "S" if s["kind"] == "sell" else "B"
-                lines.append(f"    [{icon}] 笔#{s['index']} {s['direction']} "
-                             f"理由={s['reason'] or '-'}")
+                lines.append(f"    {s['kind']} 笔#{s['index']} {s['direction']} "
+                             f"[{s['low']:.2f} ~ {s['high']:.2f}] "
+                             f"破位 {s['break']:.2f} 理由={s['reason'] or '-'}")
         if d["背驰"]:
             lines.append("  背驰：")
             for v in d["背驰"]:
                 lines.append(f"    {v['kind']} #{v['index']} {v['direction']}")
-        if d["指标_最近"]:
+        if d.get("MACD面积"):
+            lines.append(f"  MACD面积（全序列）: {d['MACD面积']}")
+        if d.get("指标_最近"):
             lines.append("  最近指标：")
             for r in d["指标_最近"]:
-                lines.append(f"    {r['time']} 收 {r['close']:.2f} "
-                             f"MACD(DIF {r['macd_dif']}, BAR {r['macd_bar']}) "
-                             f"RSI {r['rsi']} KDJ(K {r['kdj_k']}, D {r['kdj_d']}, J {r['kdj_j']})")
+                line = (f"    {r['time']} 收 {r['close']:.2f} "
+                        f"MACD(DIF {r['macd_dif']}, BAR {r['macd_bar']}) "
+                        f"RSI {r['rsi']} KDJ(K {r['kdj_k']}, D {r['kdj_d']}, J {r['kdj_j']})")
+                if r.get("boll_mid") is not None:
+                    line += f" BOLL({r['boll_low']:.2f}/{r['boll_mid']:.2f}/{r['boll_up']:.2f})"
+                if r.get("均线"):
+                    line += f" 均线{r['均线']}"
+                lines.append(line)
 
     lines.append("")
     lines.append("=" * 64)
@@ -489,6 +552,13 @@ def main():
     parser.add_argument("--output", type=str, help="输出文件路径")
     parser.add_argument("--cal_indicators", action="store_true", default=True,
                         help="计算技术指标（默认开）")
+    parser.add_argument("--笔内元素数量", type=int, default=None,
+                        help="成笔最低 K 线数（默认 5，改 3 笔数可增加约 2.9 倍）")
+    parser.add_argument("--买卖点激进识别", action="store_true", default=None,
+                        help="买卖点激进识别（不考虑分型完整性）")
+    parser.add_argument("--boll", action="store_true", help="计算 BOLL 布林带")
+    parser.add_argument("--均线", type=str, default=None,
+                        help="计算均线，逗号分隔周期（如 5,20,60）")
 
     args = parser.parse_args()
 
@@ -511,6 +581,16 @@ def main():
     # 配置：默认开启指标，关闭推送
     config = 缠论配置.不推送()
     config.计算指标 = args.cal_indicators
+    if args.笔内元素数量 is not None:
+        config.笔内元素数量 = args.笔内元素数量
+    if args.买卖点激进识别 is not None:
+        config.买卖点激进识别 = args.买卖点激进识别
+    if args.boll:
+        config.计算BOLL = True
+    if args.均线:
+        periods = [int(x) for x in args.均线.split(",") if x.strip()]
+        config.均线_类型列表 = ["SMA"]
+        config.均线_周期列表 = periods
 
     # 分析
     try:
