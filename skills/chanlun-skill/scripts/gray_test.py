@@ -164,13 +164,16 @@ def main():
         has_boll = any(r.get("boll_mid") is not None for r in det.get("指标_最近", []))
         has_ma = any(r.get("均线") for r in det.get("指标_最近", []))
         has_groups = "线段序列组" in det and "扩展线段序列组" in det
-        has_sig_types = all("买" in s["kind"] or "卖" in s["kind"]
-                            for s in det.get("买卖点", []))
+        t_prefixes = ("T1", "T1P", "T2", "T2S", "T3A", "T3B")
+        has_sig_types = all(
+            s["kind"].startswith(t_prefixes) and s["kind"][-1] in "买卖"
+            and s.get("base") in ("一买", "一卖", "二买", "二卖", "三买", "三卖")
+            for s in det.get("买卖点", []))
         check("MACD 面积量", has_area)
         check("BOLL 布林带", has_boll)
         check("均线", has_ma)
         check("级别递归序列组", has_groups)
-        check("买卖点类型化", has_sig_types)
+        check("T 系列类型化", has_sig_types)
     else:
         check("新增能力（无法运行）", False, head(txt))
 

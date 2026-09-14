@@ -215,36 +215,97 @@ def _dir_name(d) -> str:
     return s
 
 
+def _ts_val(ts) -> int:
+    """时间戳统一为可比较的秒级数值。"""
+    if ts is None:
+        return 0
+    try:
+        if isinstance(ts, (int, float)):
+            return int(ts)
+        return int(ts.timestamp())
+    except (ValueError, OSError, OverflowError, AttributeError):
+        return 0
+
+
+def _trend_type(obs: 观察者) -> str:
+    """走势类型判定：盘整 / 趋势。
+
+    缠论标准：≥2 个依次同向的中枢 = 趋势；0~1 个 = 盘整。
+    用中枢方向序列的最大连续同向长度判定。
+    """
+    dirs = [_dir_name(z.方向) for z in obs.笔_中枢序列]
+    max_same = 1
+    cur = 1
+    for i in range(1, len(dirs)):
+        if dirs[i] == dirs[i - 1]:
+            cur += 1
+            max_same = max(max_same, cur)
+        else:
+            cur = 1
+    return "趋势" if max_same >= 2 else "盘整"
+
+
+def _inside_hub(obs: 观察者, price: float) -> bool:
+    """价格是否落在某个笔中枢 [低, 高] 区间内。"""
+    for z in obs.笔_中枢序列:
+        if z.低 <= price <= z.高:
+            return True
+    return False
+
+
+def _first_type_ts(obs: 观察者):
+    """找第一个一类买卖点（背驰点）的时间戳，用于 T3A/T3B 时序判定。"""
+    for s in obs.笔序列:
+        try:
+            meaningful, reason = 虚线.买卖意义(s, obs)
+        except Exception:
+            meaningful, reason = False, ""
+        if meaningful and "背驰" in reason:
+            return _ts_val(s.武.时间戳)
+    return None
+
+
 def _classify_signals(obs: 观察者) -> list:
-    """识别一二三类买卖点（保守版，基于核心库明确语义）。
+    """识别 T 系列买卖点（六类买卖点 = 走势类型 + 背驰信息对基础买卖点的精确化）。
 
-    判据（对应缠论标准定义，全部取核心库已算好的字段，不做二次推断）：
-    - 三买/三卖：`中枢.第三买卖线` 非空 —— 核心库已算好的「离开中枢后
-      与中枢形成缺口（不回中枢）」的确认线。向上离开中枢 → 三买；向下 → 三卖。
-      破位值取中枢重叠区间的上沿(三买)/下沿(三卖)，回踩跌破即失效。
-    - 一买/一卖：具备 `虚线.买卖意义` 且 reason 含「背驰」—— 趋势背驰点。
-      破位值取该笔端点，跌破即失效。
-    - 二买/二卖：其余具备买卖意义的笔 —— 中枢震荡中的次级别买卖点。
+    在 6 类基础买卖点（一/二/三 × 买/卖）之上，按走势类型与位置二次细分：
+    - 一类买卖点（背驰点）：
+        T1  = 趋势背驰（≥2 个同向中枢）
+        T1P = 盘整背驰（0~1 个中枢）
+    - 二类买卖点（有买卖意义、非背驰）：
+        T2  = 标准二类（不在中枢内）
+        T2S = 类二类（落在某个中枢 [低,高] 区间内）
+    - 三类买卖点（中枢第三买卖线非空）：
+        T3A = 中枢在一类之后形成
+        T3B = 中枢在一类之前形成
 
-    说明：严格缠论的一二类买卖点需多级别递归，本实现是基于笔中枢的简化识别，
-    用核心库 `买卖意义`（背驰/极值/MACD 匹配）区分一类与二类，可作为初筛而非最终结论。
+    方向口径：向下笔终点（底分型）= 买；向上笔终点（顶分型）= 卖。
+    第三买卖线：向上离开中枢 = 三买；向下 = 三卖。
     """
     signals = []
+    trend = _trend_type(obs)
+    first_ts = _first_type_ts(obs)
 
-    # 三买/三卖：来自中枢第三买卖线
+    # 三类买卖点：来自中枢第三买卖线
     for z in obs.笔_中枢序列:
         line = z.第三买卖线
         if line is None:
             continue
         d = _dir_name(line.方向)
         is_buy = d == "向上"  # 向上离开中枢后回踩不回 → 三买
+        hub_ts = _ts_val(z.武.时间戳)
+        if first_ts is not None and hub_ts < first_ts:
+            base = "T3B"  # 中枢在一类之前
+        else:
+            base = "T3A"  # 中枢在一类之后（或无一类参考）
         signals.append({
-            "kind": "三买" if is_buy else "三卖",
+            "kind": base + ("买" if is_buy else "卖"),
+            "base": "三买" if is_buy else "三卖",
             "index": line.序号,
             "direction": d,
             "high": line.高, "low": line.低,
             "break": z.高 if is_buy else z.低,  # 中枢上沿/下沿，回踩跌破即失效
-            "reason": f"中枢#{z.序号} 第三买卖线",
+            "reason": f"中枢#{z.序号} 第三买卖线（走势={trend}）",
         })
 
     # 一/二类：来自具备买卖意义的笔
@@ -257,9 +318,17 @@ def _classify_signals(obs: 观察者) -> list:
             continue
         d = _dir_name(s.方向)
         is_buy = d == "向下"  # 向下笔终点是底分型 → 买点语境
-        is_first = "背驰" in reason  # 趋势背驰 → 一类
+        is_first = "背驰" in reason  # 背驰 → 一类
+        price = s.低 if is_buy else s.高
+        if is_first:
+            base = "T1" if trend == "趋势" else "T1P"
+            base_label = "一买" if is_buy else "一卖"
+        else:
+            base = "T2S" if _inside_hub(obs, price) else "T2"
+            base_label = "二买" if is_buy else "二卖"
         signals.append({
-            "kind": ("一买" if is_buy else "一卖") if is_first else ("二买" if is_buy else "二卖"),
+            "kind": base + ("买" if is_buy else "卖"),
+            "base": base_label,
             "index": s.序号,
             "direction": d,
             "high": s.高, "low": s.低,
@@ -520,9 +589,9 @@ def render_text(result: dict) -> str:
                 lines.append(f"    中枢#{z['序号']} 区间 [{z['低']:.2f} ~ {z['高']:.2f}] "
                              f"极值 [{z['低低']:.2f} ~ {z['高高']:.2f}] {z['状态']}")
         if d["买卖点"]:
-            lines.append("  买卖点：")
+            lines.append("  买卖点（T 系列）：")
             for s in d["买卖点"]:
-                lines.append(f"    {s['kind']} 笔#{s['index']} {s['direction']} "
+                lines.append(f"    {s['kind']}（{s['base']}） 笔#{s['index']} {s['direction']} "
                              f"[{s['low']:.2f} ~ {s['high']:.2f}] "
                              f"破位 {s['break']:.2f} 理由={s['reason'] or '-'}")
         if d["背驰"]:
