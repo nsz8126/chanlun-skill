@@ -275,8 +275,8 @@ def _classify_signals(obs: 观察者) -> list:
         T2  = 标准二类（一类之后的第一次回踩不破）
         T2S = 类二类（一类之后的后续回踩不破）
     - 三类买卖点（中枢第三买卖线非空）：
-        T3A = 中枢在一类之后形成
-        T3B = 中枢在一类之前形成
+        T3A = 中枢在一类之后形成（反转后新建中枢再突破）
+        T3B = 中枢在一类之前形成（突破老中枢 = 二三类重合）
 
     方向口径：向下笔终点（底分型）= 买；向上笔终点（顶分型）= 卖。
     第三买卖线：向上离开中枢 = 三买；向下 = 三卖。
@@ -297,6 +297,10 @@ def _classify_signals(obs: 观察者) -> list:
             base = "T3B"  # 中枢在一类之前
         else:
             base = "T3A"  # 中枢在一类之后（或无一类参考）
+        reason_text = f"中枢#{z.序号} 第三买卖线（走势={trend}"
+        if base == "T3B":
+            reason_text += "，二三类重合"
+        reason_text += "）"
         signals.append({
             "kind": base + ("买" if is_buy else "卖"),
             "base": "三买" if is_buy else "三卖",
@@ -304,7 +308,7 @@ def _classify_signals(obs: 观察者) -> list:
             "direction": d,
             "high": line.高, "low": line.低,
             "break": z.高 if is_buy else z.低,  # 中枢上沿/下沿，回踩跌破即失效
-            "reason": f"中枢#{z.序号} 第三买卖线（走势={trend}）",
+            "reason": reason_text,
         })
 
     # 一/二类：来自具备买卖意义的笔
