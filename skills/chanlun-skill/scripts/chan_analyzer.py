@@ -252,14 +252,6 @@ def _trend_type(obs: 观察者) -> str:
     return "盘整"
 
 
-def _inside_hub(obs: 观察者, price: float) -> bool:
-    """价格是否落在某个笔中枢 [低, 高] 区间内。"""
-    for z in obs.笔_中枢序列:
-        if z.低 <= price <= z.高:
-            return True
-    return False
-
-
 def _first_type_ts(obs: 观察者):
     """找第一个一类买卖点（背驰点）的时间戳，用于 T3A/T3B 时序判定。"""
     for s in obs.笔序列:
@@ -275,13 +267,13 @@ def _first_type_ts(obs: 观察者):
 def _classify_signals(obs: 观察者) -> list:
     """识别 T 系列买卖点（六类买卖点 = 走势类型 + 背驰信息对基础买卖点的精确化）。
 
-    在 6 类基础买卖点（一/二/三 × 买/卖）之上，按走势类型与位置二次细分：
+    在 6 类基础买卖点（一/二/三 × 买/卖）之上，按走势类型与回踩次序二次细分：
     - 一类买卖点（背驰点）：
-        T1  = 趋势背驰（≥2 个同向中枢）
+        T1  = 趋势背驰（≥2 个依次同向、区间无重叠的中枢）
         T1P = 盘整背驰（0~1 个中枢）
     - 二类买卖点（有买卖意义、非背驰）：
-        T2  = 标准二类（不在中枢内）
-        T2S = 类二类（落在某个中枢 [低,高] 区间内）
+        T2  = 标准二类（一类之后的第一次回踩不破）
+        T2S = 类二类（一类之后的后续回踩不破）
     - 三类买卖点（中枢第三买卖线非空）：
         T3A = 中枢在一类之后形成
         T3B = 中枢在一类之前形成
@@ -316,6 +308,9 @@ def _classify_signals(obs: 观察者) -> list:
         })
 
     # 一/二类：来自具备买卖意义的笔
+    # 二类按「一类之后的回踩次序」区分：第一次回踩 = T2，后续回踩 = T2S
+    buy_stage = 0   # 一买之后出现过的非背驰买点计数
+    sell_stage = 0  # 一卖之后出现过的非背驰卖点计数
     for s in obs.笔序列:
         try:
             meaningful, reason = 虚线.买卖意义(s, obs)
@@ -326,12 +321,21 @@ def _classify_signals(obs: 观察者) -> list:
         d = _dir_name(s.方向)
         is_buy = d == "向下"  # 向下笔终点是底分型 → 买点语境
         is_first = "背驰" in reason  # 背驰 → 一类
-        price = s.低 if is_buy else s.高
         if is_first:
             base = "T1" if trend == "趋势" else "T1P"
             base_label = "一买" if is_buy else "一卖"
+            # 一类点出现后，重置对应方向的二类回踩计数
+            if is_buy:
+                buy_stage = 0
+            else:
+                sell_stage = 0
         else:
-            base = "T2S" if _inside_hub(obs, price) else "T2"
+            if is_buy:
+                buy_stage += 1
+                base = "T2" if buy_stage == 1 else "T2S"
+            else:
+                sell_stage += 1
+                base = "T2" if sell_stage == 1 else "T2S"
             base_label = "二买" if is_buy else "二卖"
         signals.append({
             "kind": base + ("买" if is_buy else "卖"),
