@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chanlun-skill"
+version = "0.1.0"
+description = "基于 chanlun + eltdx 的 A 股缠论分析 Skills"
+requires-python = ">=3.10"
+dependencies = [
+    "chanlun>=2606",
+    "eltdx>=3.0",
+]
+
+[project.scripts]
+chanlun-skill = "chanlun_skill.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["chanlun_skill*"]

@@ -1,0 +1,87 @@
+name: chanlun-skill
+description: 基于chanlun库和eltdx库的A股缠论分析技能，支持多周期分析、买卖点识别和背驰检测。
+version: 1.0.0
+author: chanlun.rs
+
+capabilities:
+  - multi_period_analysis
+  - buy_sell_signal_detection
+  - divergence_detection
+  - technical_indicators
+  - structure_analysis
+
+supported_periods:
+  - 1m
+  - 5m
+  - 15m
+  - 30m
+  - 60m
+  - day
+
+dependencies:
+  - chanlun
+  - eltdx
+
+python_version: ">=3.11"
+
+usage:
+  - name: analyze_stock
+    description: 分析股票的缠论结构和买卖点
+    parameters:
+      symbol:
+        type: string
+        description: 股票代码，如 sz000001, sh600000
+      periods:
+        type: array
+        description: 分析周期列表
+        items:
+          type: string
+          enum: ["1m", "5m", "15m", "30m", "60m", "day"]
+      count:
+        type: integer
+        description: 每个周期获取的K线数量
+        default: 800
+
+  - name: detect_divergence
+    description: 检测股票的背驰信号
+    parameters:
+      symbol:
+        type: string
+        description: 股票代码
+      period:
+        type: string
+        description: 分析周期
+        enum: ["1m", "5m", "15m", "30m", "60m", "day"]
+
+  - name: get_signals
+    description: 获取股票的买卖点信号
+    parameters:
+      symbol:
+        type: string
+        description: 股票代码
+      period:
+        type: string
+        description: 分析周期
+        enum: ["1m", "5m", "15m", "30m", "60m", "day"]
+
+  - name: identify_standard_signals
+    description: 识别标准缠论买卖点（一买、二买、三买等）
+    parameters:
+      symbol:
+        type: string
+        description: 股票代码
+      period:
+        type: string
+        description: 分析周期
+        enum: ["1m", "5m", "15m", "30m", "60m", "day"]
+
+  - name: get_standard_signal_summary
+    description: 获取标准买卖点摘要
+    parameters:
+      symbol:
+        type: string
+        description: 股票代码
+      period:
+        type: string
+        description: 分析周期
+        enum: ["1m", "5m", "15m", "30m", "60m", "day"]
