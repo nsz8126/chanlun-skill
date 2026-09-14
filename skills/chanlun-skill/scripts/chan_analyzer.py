@@ -274,7 +274,7 @@ def _classify_signals(obs: 观察者) -> list:
 def _divergences(obs: 观察者) -> list:
     """基于核心库 `背驰分析` 与 `线段.判断线段内部是否背驰` 检测背驰。
 
-    线段对象的方法为 classmethod，实例必须作第一个参数传入。
+    线段/笔对象的方法为 classmethod，实例必须作第一个参数传入。
     """
     results = []
     # 线段级内部背驰（最贴近原文的「线段内部背驰」）
@@ -289,6 +289,19 @@ def _divergences(obs: 观察者) -> list:
                 "index": seg.序号,
                 "direction": _dir_name(seg.方向),
                 "high": seg.高, "low": seg.低,
+            })
+    # 笔内 MACD 趋向背驰（笔.是否背驰过）
+    for s in obs.笔序列:
+        try:
+            positions = 笔.是否背驰过(s, obs)
+        except Exception:
+            positions = []
+        if positions:
+            results.append({
+                "kind": "笔内背驰",
+                "index": s.序号,
+                "direction": _dir_name(s.方向),
+                "high": s.高, "low": s.低,
             })
     # 相邻线段对之间的 MACD/斜率/测度/全量背驰
     segs = obs.线段序列
@@ -559,6 +572,8 @@ def main():
     parser.add_argument("--boll", action="store_true", help="计算 BOLL 布林带")
     parser.add_argument("--均线", type=str, default=None,
                         help="计算均线，逗号分隔周期（如 5,20,60）")
+    parser.add_argument("--均线类型", type=str, default="SMA",
+                        help="均线类型（SMA/EMA，逗号分隔，如 SMA,EMA）")
 
     args = parser.parse_args()
 
@@ -589,7 +604,9 @@ def main():
         config.计算BOLL = True
     if args.均线:
         periods = [int(x) for x in args.均线.split(",") if x.strip()]
-        config.均线_类型列表 = ["SMA"]
+        types = [t.strip().upper() for t in args.均线类型.split(",") if t.strip()]
+        types = [t for t in types if t in ("SMA", "EMA")] or ["SMA"]
+        config.均线_类型列表 = types
         config.均线_周期列表 = periods
 
     # 分析
