@@ -81,22 +81,55 @@ def upper_period(seconds: int) -> int:
     return seconds  # 已是最大周期则回退
 
 
+def lower_period(seconds: int) -> int:
+    """返回严格小于当前周期的最大标准周期。
+
+    当目标周期已是最大周期（month）时，无法向上补足，需向下补一个「占位周期」
+    使周期组长度 ≥2 以满足 `立体分析器` 的硬约束；此时该占位周期不会被投喂数据。
+    """
+    prev = None
+    for p in _PERIOD_ORDER:
+        if p >= seconds:
+            break
+        prev = p
+    return prev
+
+
 # ---------------------------------------------------------------------------
 # 数据加载
 # ---------------------------------------------------------------------------
 def load_csv_data(file_path: str) -> list:
     data = []
-    with open(file_path, "r", encoding="utf-8-sig") as f:
+    try:
+        f = open(file_path, "r", encoding="utf-8-sig")
+    except FileNotFoundError:
+        raise SystemExit(f"错误：找不到文件 {file_path!r}")
+    except OSError as e:
+        raise SystemExit(f"错误：无法读取文件 {file_path!r}：{e}")
+
+    required = {"date", "open", "high", "low", "close", "volume"}
+    with f:
         reader = csv.DictReader(f)
-        for row in reader:
-            data.append({
-                "date": row["date"],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row["volume"]),
-            })
+        if reader.fieldnames is None:
+            raise SystemExit(f"错误：{file_path!r} 无表头")
+        missing = required - set(reader.fieldnames)
+        if missing:
+            raise SystemExit(
+                f"错误：{file_path!r} 缺少必需列 {sorted(missing)}，"
+                f"需要 {sorted(required)}")
+        for i, row in enumerate(reader, start=2):
+            try:
+                data.append({
+                    "date": row["date"],
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                })
+            except (KeyError, ValueError, TypeError) as e:
+                raise SystemExit(
+                    f"错误：{file_path!r} 第 {i} 行数据非法（{e}）：{row!r}")
     return data
 
 
@@ -292,29 +325,50 @@ def _indicator_tail(obs: 观察者, n: int = 3) -> list:
 # 结构化结果
 # ---------------------------------------------------------------------------
 def analyze(symbol: str, data: list, freq: str, config: 缠论配置 = None) -> dict:
-    """投喂数据并产出结构化结果。"""
+    """投喂数据并产出结构化结果。
+
+    周期组必须长度 ≥2，否则 `立体分析器` 会触发 Rust 侧 PanicException。
+    - 常规：`[目标周期, 更大周期]`，走 `投喂K线` 自动合成大周期。
+    - 目标已是最大周期（month）：`[更小周期, month]`，直接对 month 观察者
+      `增加原始K线` 投喂（`投喂K线` 会校验周期 == 周期组最小值，month 无法作为
+      最小值投喂），更小周期作为占位留空。
+    """
     seconds = period_to_seconds(freq)
-    periods = [seconds]
     up = upper_period(seconds)
-    if up != seconds and up not in periods:
-        periods.append(up)  # 保证周期组长度 ≥2，避免单周期 panic
+    is_max_period = (up == seconds)  # 无更大周期可补
+
+    if is_max_period:
+        periods = [lower_period(seconds), seconds]
+    else:
+        periods = [seconds, up]
 
     cfg = config if config is not None else 缠论配置.不推送()
     engine = 立体分析器(symbol, periods, cfg)
 
-    for i, row in enumerate(data):
-        ts = _parse_date(row["date"], i)
-        k = K线.创建普K(
-            symbol, ts, row["open"], row["high"], row["low"], row["close"],
-            row["volume"], i, seconds,
-        )
-        try:
-            engine.投喂K线(k)
-        except BaseException:
-            # PanicException 继承 BaseException，这里兜底让错误可见而非静默崩
-            raise
+    if is_max_period:
+        # 直接对目标观察者投喂，绕过 投喂K线 的周期校验
+        target_obs = engine._单体分析器[seconds]
+        for i, row in enumerate(data):
+            ts = _parse_date(row["date"], i)
+            k = K线.创建普K(
+                symbol, ts, row["open"], row["high"], row["low"], row["close"],
+                row["volume"], i, seconds,
+            )
+            target_obs.增加原始K线(k)
+    else:
+        for i, row in enumerate(data):
+            ts = _parse_date(row["date"], i)
+            k = K线.创建普K(
+                symbol, ts, row["open"], row["high"], row["low"], row["close"],
+                row["volume"], i, seconds,
+            )
+            try:
+                engine.投喂K线(k)
+            except BaseException:
+                # PanicException 继承 BaseException，这里兜底让错误可见而非静默崩
+                raise
 
-    # 每个周期一个观察者
+    # 每个周期一个观察者（空周期会被过滤）
     observers = {p: engine._单体分析器[p] for p in periods}
 
     result = {
@@ -326,6 +380,8 @@ def analyze(symbol: str, data: list, freq: str, config: 缠论配置 = None) -> 
     }
 
     for p, obs in observers.items():
+        if len(obs.普通K线序列) == 0:
+            continue  # 占位周期无数据，跳过
         name = seconds_to_name(p)
         detail = {
             "普通K线": len(obs.普通K线序列),
@@ -457,7 +513,17 @@ def main():
     config.计算指标 = args.cal_indicators
 
     # 分析
-    result = analyze(args.symbol, data, args.freq, config)
+    try:
+        result = analyze(args.symbol, data, args.freq, config)
+    except ValueError as e:
+        print(f"错误：{e}", file=sys.stderr)
+        sys.exit(1)
+    except SystemExit:
+        raise
+    except BaseException as e:
+        # 兜底：PanicException 继承 BaseException，这里让错误可见而非无声猝死
+        print(f"错误：分析失败（{type(e).__name__}）：{e}", file=sys.stderr)
+        sys.exit(1)
 
     # 输出
     if args.json:
