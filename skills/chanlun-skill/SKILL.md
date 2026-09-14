@@ -175,7 +175,7 @@ python scripts/chan_analyzer.py \
 python scripts/chan_analyzer.py \
     --source csv --input scripts/test_data.csv --symbol 000001 --freq day --json
 
-# 在线数据（eltdx，需 pip install eltdx）
+# 在线数据（eltdx 3.x，通达信 7709 协议，需网络连通）
 python scripts/chan_analyzer.py \
     --source eltdx --code sh600519 --freq day --count 800
 
@@ -183,6 +183,8 @@ python scripts/chan_analyzer.py \
 python scripts/chan_analyzer.py \
     --source csv --input scripts/test_data.csv --symbol 000001 --freq day --output report.txt
 ```
+
+> eltdx 模式 `--code` 即标的（如 sh600519 / sz000001 / 000001），分析标题自动用 code；`--symbol` 可覆盖。周期 `--freq` 支持 1m/5m/15m/30m/60m/day/week/month。
 
 **脚本输出内容**（每个周期）：
 - 结构计数：K线/缠K/分型/笔/笔中枢/线段/中枢/扩展线段/扩展中枢/线段_线段/扩展线段_扩展线段

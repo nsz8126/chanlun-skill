@@ -134,7 +134,12 @@ def load_csv_data(file_path: str) -> list:
 
 
 def load_eltdx_data(code: str, freq: str, start_date: str = None, end_date: str = None, count: int = 800) -> list:
-    """从 eltdx（通达信协议）获取 K 线。需要 `pip install eltdx` 且网络可达。"""
+    """从 eltdx（通达信 7709 协议）获取 K 线。需要 `pip install eltdx` 且网络可达。
+
+    eltdx 3.x API：`TdxClient` 支持上下文管理器（自动连接/关闭），
+    取 K 线走 `client.bars.get(code, period=..., count=...)`，返回对象含 `.bars`
+    （KlineBar 元组，字段 time/open/high/low/close/volume_lots）。
+    """
     try:
         from eltdx import TdxClient
     except ImportError:
@@ -149,21 +154,16 @@ def load_eltdx_data(code: str, freq: str, start_date: str = None, end_date: str 
 
     data = []
     try:
-        with TdxClient() as client:
-            from eltdx.constant import KLINE_TYPE  # 兼容不同 eltdx 版本
-            # 不同版本 API 略有差异，这里用最通用的方式
-            try:
-                series = client.get_kline(code, period, count=count)
-            except TypeError:
-                series = client.get_kline(code, period, count)
-            for bar in series:
+        with TdxClient(timeout=15) as client:
+            series = client.bars.get(code, period=period, count=count)
+            for bar in series.bars:
                 data.append({
                     "date": bar.time.strftime("%Y-%m-%d"),
                     "open": bar.open,
                     "high": bar.high,
                     "low": bar.low,
                     "close": bar.close,
-                    "volume": getattr(bar, "volume_lots", getattr(bar, "volume", 0)),
+                    "volume": bar.volume_lots,
                 })
     except Exception as e:
         raise SystemExit(f"错误：从 eltdx 获取数据失败：{e}")
@@ -642,7 +642,8 @@ def main():
     parser.add_argument("--source", choices=["csv", "eltdx"], default="csv", help="数据源")
     parser.add_argument("--input", type=str, help="CSV 文件路径（csv 模式）")
     parser.add_argument("--code", type=str, help="股票代码（eltdx 模式，如 sh600519）")
-    parser.add_argument("--symbol", type=str, default="000001", help="标的标识")
+    parser.add_argument("--symbol", type=str, default=None,
+                        help="标的标识（默认：csv 模式为 000001，eltdx 模式为 code）")
     parser.add_argument("--start_date", type=str, help="开始日期 YYYY-MM-DD（eltdx）")
     parser.add_argument("--end_date", type=str, help="结束日期 YYYY-MM-DD（eltdx）")
     parser.add_argument("--freq", type=str, default="day", help="分析周期（1m/5m/.../day/week/month 或中文）")
@@ -696,8 +697,9 @@ def main():
         config.均线_周期列表 = periods
 
     # 分析
+    symbol = args.symbol or (args.code if args.source == "eltdx" else "000001")
     try:
-        result = analyze(args.symbol, data, args.freq, config)
+        result = analyze(symbol, data, args.freq, config)
     except ValueError as e:
         print(f"错误：{e}", file=sys.stderr)
         sys.exit(1)
