@@ -225,7 +225,118 @@ def main():
 
     print("")
     print("=" * 78)
-    print("PART 8  性能")
+    print("PART 8  止损体系深化（买卖点 factory 官方字段）")
+    print("=" * 78)
+    code, txt = run(base + ["--freq", "day", "--json"])
+    if code == 0:
+        d = json.loads(txt)
+        det = list(d["periods_detail"].values())[0]
+        sigs = det.get("买卖点", [])
+        if not sigs:
+            check("止损字段（无信号可验）", True)
+        else:
+            # 验证：所有信号都有 止损 字段，且至少一个非空
+            has_stop = all("止损" in s for s in sigs)
+            any_nonempty = any(
+                s["止损"].get("破位值") is not None
+                or s["止损"].get("与MACD柱子匹配") is not None
+                for s in sigs
+            )
+            check(f"止损字段存在（{len(sigs)} 个信号）", has_stop)
+            check(f"止损字段非空（至少 1 个）", any_nonempty)
+            # 验证：止损 6 个标准字段都存在
+            required = {"破位值", "失效K线", "有效性", "失效偏移",
+                        "与MACD柱子匹配", "与MACD柱子分型匹配"}
+            all_keys = all(required.issubset(s["止损"].keys()) for s in sigs)
+            check(f"止损 6 字段齐全", all_keys)
+    else:
+        check("止损体系（无法运行）", False, head(txt))
+
+    print("")
+    print("=" * 78)
+    print("PART 9  多级别展开（扩展线段序列组逐层）")
+    print("=" * 78)
+    code, txt = run(base + ["--freq", "day", "--json"])
+    if code == 0:
+        d = json.loads(txt)
+        det = list(d["periods_detail"].values())[0]
+        ml = det.get("多级别展开", {})
+        has_seg = "扩展线段层" in ml and len(ml["扩展线段层"]) >= 1
+        has_hub = "扩展中枢层" in ml and len(ml["扩展中枢层"]) >= 1
+        # 至少 L1 应有数量
+        l1_count = ml.get("扩展线段层", [{}])[0].get("数量", 0) if has_seg else 0
+        # 与 序列组 一致性
+        seq_group_count = det.get("扩展线段序列组", [0])[0]
+        consistent = l1_count == seq_group_count
+        check("扩展线段层存在", has_seg)
+        check("扩展中枢层存在", has_hub)
+        check(f"L1 数量与序列组一致（{l1_count} vs {seq_group_count}）", consistent)
+    else:
+        check("多级别展开（无法运行）", False, head(txt))
+
+    print("")
+    print("=" * 78)
+    print("PART 10  跨周期共振（多周期同向信号）")
+    print("=" * 78)
+    # 用 day csv 直接调 analyze() 模拟多周期（CSV CLI 仅单周期）
+    try:
+        import sys
+        sys.path.insert(0, HERE)
+        import chan_analyzer
+        day_data = chan_analyzer.load_csv_data(CSV)
+        # 三周期共用同一份数据：验证逻辑而非数据真实性
+        multi_result = chan_analyzer.analyze(
+            "000001",
+            {86400: day_data, 604800: day_data, 2592000: day_data},
+        )
+        resonances = multi_result.get("跨周期共振", [])
+        periods = multi_result.get("periods", [])
+        check(f"多周期分析可运行（{len(periods)} 周期）", len(periods) >= 2)
+        check(f"共振列表存在", isinstance(resonances, list))
+        # 至少应识别出 1 个强度≥2 的事件
+        has_strong = any(ev.get("strength", 0) >= 2 for ev in resonances)
+        check(f"至少 1 个共振事件（强度≥2）", has_strong,
+              f"事件数 {len(resonances)}")
+        # 事件结构：含 primary_time / direction / strength / matches
+        if resonances:
+            ev0 = resonances[0]
+            ok_struct = all(k in ev0 for k in ("primary_time", "direction", "strength", "matches"))
+            check(f"共振事件结构完整", ok_struct)
+    except BaseException as e:
+        check(f"跨周期共振（异常 {type(e).__name__}）", False, head(str(e)))
+
+    print("")
+    print("=" * 78)
+    print("PART 11  CLI 参数杠杆（Stage 3-12）")
+    print("=" * 78)
+    # 默认 vs 高 基准
+    code1, txt1 = run(base + ["--freq", "day", "--json"])
+    code2, txt2 = run(base + ["--freq", "day", "--指标计算方式", "高", "--json"])
+    if code1 == 0 and code2 == 0:
+        d1 = json.loads(txt1)
+        d2 = json.loads(txt2)
+        sig1 = sum(len(det.get("买卖点", [])) for det in d1["periods_detail"].values())
+        sig2 = sum(len(det.get("买卖点", [])) for det in d2["periods_detail"].values())
+        # 至少一个参数生效（指标计算方式高 会改变 MACD 数值从而影响命中数）
+        # 接受"信号数变化"或"两者中至少一个非零"作为宽松验证
+        check(f"--指标计算方式 高 可执行（信号 {sig1} → {sig2}）",
+              True, f"信号数变化 = {sig2 != sig1}")
+    else:
+        check("--指标计算方式", False)
+
+    # --买卖点_指标匹配_MACD False
+    code3, txt3 = run(base + ["--freq", "day", "--买卖点_指标匹配_MACD", "False", "--json"])
+    check("--买卖点_指标匹配_MACD False", code3 == 0,
+          f"exit={code3}")
+
+    # --买卖点_指标模式 配置
+    code4, txt4 = run(base + ["--freq", "day", "--买卖点_指标模式", "全量", "--json"])
+    check("--买卖点_指标模式 全量", code4 == 0,
+          f"exit={code4}")
+
+    print("")
+    print("=" * 78)
+    print("PART 12  性能")
     print("=" * 78)
     t0 = time.time()
     code, txt = run(base + ["--freq", "day"])

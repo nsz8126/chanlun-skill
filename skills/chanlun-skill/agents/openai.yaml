@@ -1,6 +1,6 @@
 name: chanlun-skill
 description: 基于 chanlun 库的 A 股缠论分析技能，支持多周期结构分析、买卖点识别、背驰检测与技术指标。
-version: 3.0.0
+version: 3.1.0
 author: chanlun.rs
 
 capabilities:
@@ -9,6 +9,9 @@ capabilities:
   - buy_sell_signal_detection
   - divergence_detection
   - technical_indicators
+  - cross_period_resonance
+  - stop_loss_factory
+  - multi_level_expansion
 
 supported_periods:
   - 1m
