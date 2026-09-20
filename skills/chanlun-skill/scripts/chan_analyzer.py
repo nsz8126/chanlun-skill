@@ -1020,11 +1020,18 @@ def _stop_loss_info(stroke_or_line, obs: 观察者, kind: str) -> dict:
     - 输出字段含：破位值/失效K线/有效性/与MACD柱子分型匹配/与MACD柱子匹配/偏移/失效偏移。
     """
     info = {
+        "类型": None,
+        "备注": None,
+        "结构": None,
+        "偏移": None,
         "破位值": None,
         "失效K线": None,
+        "终结K线": None,
         "有效性": True,
         "失效偏移": None,
         "与MACD柱子匹配": None,
+        "与RSI匹配": None,
+        "与KDJ匹配": None,
         "与MACD柱子分型匹配": None,
     }
     # factory 方法命名：kind 末尾追加「点」即可 → e.g. "T1买"→"T1买点"
@@ -1053,18 +1060,38 @@ def _stop_loss_info(stroke_or_line, obs: 观察者, kind: str) -> dict:
         return info
 
     # 安全取值（factory 输出的部分字段可能抛错）
+    def _safe_value(value, attr=None):
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if attr in ("失效K线", "终结K线"):
+            return {
+                "时间": _fmt_ts(getattr(value, "时间戳", None)),
+                "开": getattr(value, "开盘价", None),
+                "高": getattr(value, "最高价", None),
+                "低": getattr(value, "最低价", None),
+                "收": getattr(value, "收盘价", None),
+            }
+        return str(value)
+
     def _safe(attr, default=None):
         try:
             v = getattr(bp, attr, default)
-            return _fmt_ts(v) if attr == "失效K线" and v is not None else v
+            return _safe_value(v, attr)
         except BaseException:
             return default
 
     info["破位值"] = _safe("破位值")
+    info["类型"] = _safe("类型")
+    info["备注"] = _safe("备注")
+    info["结构"] = _safe("结构")
+    info["偏移"] = _safe("偏移")
     info["失效K线"] = _safe("失效K线")
+    info["终结K线"] = _safe("终结K线")
     info["有效性"] = _safe("有效性", True)
     info["失效偏移"] = _safe("失效偏移")
     info["与MACD柱子匹配"] = _safe("与MACD柱子匹配")
+    info["与RSI匹配"] = _safe("与RSI匹配")
+    info["与KDJ匹配"] = _safe("与KDJ匹配")
     info["与MACD柱子分型匹配"] = _safe("与MACD柱子分型匹配")
     return info
 
@@ -1336,9 +1363,61 @@ def _structure_alignment(periods_detail: dict) -> list:
             "关系": relation,
             "低周期线段": lower,
             "高周期线段": upper,
+            "端点对应": {
+                "低周期起点": lower.get("起点"),
+                "低周期终点": lower.get("终点"),
+                "高周期起点": upper.get("起点"),
+                "高周期终点": upper.get("终点"),
+                "起点在高周期内": upper_start <= lower_start <= upper_end,
+                "终点在高周期内": upper_start <= lower_end <= upper_end,
+            },
+            "价格包含": {
+                "低周期高点": lower.get("高"),
+                "低周期低点": lower.get("低"),
+                "高周期高点": upper.get("高"),
+                "高周期低点": upper.get("低"),
+                "低周期价格被包含": (
+                    upper.get("低") <= lower.get("低")
+                    and lower.get("高") <= upper.get("高")
+                ),
+            },
             "说明": "时间与方向映射，不代表 Rust 核心建立了线段身份对应",
         })
     return alignments
+
+
+def _segment_detail(segment) -> dict:
+    """Serialize a segment plus Rust fine-grained structural evidence."""
+
+    row = {
+        "序号": getattr(segment, "序号", None),
+        "方向": _dir_name(getattr(segment, "方向", None)),
+        "高": getattr(segment, "高", None),
+        "低": getattr(segment, "低", None),
+        "起点": _fmt_ts(getattr(getattr(segment, "文", None), "时间戳", None)),
+        "终点": _fmt_ts(getattr(getattr(segment, "武", None), "时间戳", None)),
+    }
+    for label, method_name in (
+        ("四象", "四象"),
+        ("特征分型终结", "特征分型终结"),
+        ("特征序列状态", "特征序列状态"),
+        ("缺口", "获取缺口"),
+    ):
+        method = getattr(线段, method_name, None)
+        if method is None:
+            row[label] = None
+            continue
+        try:
+            value = method(segment)
+            if label == "缺口" and value is not None:
+                row[label] = str(value)
+            elif isinstance(value, tuple):
+                row[label] = list(value)
+            else:
+                row[label] = value
+        except BaseException:
+            row[label] = None
+    return row
 
 
 def _multi_level_detail(obs: 观察者) -> dict:
@@ -1358,8 +1437,7 @@ def _multi_level_detail(obs: 观察者) -> dict:
             "层级": li + 1,
             "数量": len(group),
             "线段": [
-                {"序号": s.序号, "方向": _dir_name(s.方向), "高": s.高, "低": s.低,
-                 "起点": _fmt_ts(s.文.时间戳), "终点": _fmt_ts(s.武.时间戳)}
+                _segment_detail(s)
                 for s in group
             ],
         })
@@ -1374,7 +1452,26 @@ def _multi_level_detail(obs: 观察者) -> dict:
                 for z in group
             ],
         })
-    return {"扩展线段层": seg_levels, "扩展中枢层": hub_levels}
+    mixed_seg_levels = []
+    for li, group in enumerate(getattr(obs, "混合扩展线段序列组", [])):
+        mixed_seg_levels.append({
+            "层级": li + 1,
+            "数量": len(group),
+            "线段": [_segment_detail(s) for s in group],
+        })
+    mixed_hub_levels = []
+    for li, group in enumerate(getattr(obs, "混合扩展中枢序列组", [])):
+        mixed_hub_levels.append({
+            "层级": li + 1,
+            "数量": len(group),
+            "中枢": [_hub_detail(z) for z in group],
+        })
+    return {
+        "扩展线段层": seg_levels,
+        "扩展中枢层": hub_levels,
+        "混合扩展线段层": mixed_seg_levels,
+        "混合扩展中枢层": mixed_hub_levels,
+    }
 
 
 def _get_container(k, name):
