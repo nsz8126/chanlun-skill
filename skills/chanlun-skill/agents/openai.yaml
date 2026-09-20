@@ -1,6 +1,6 @@
 name: chanlun-skill
 description: 基于 chanlun 库的 A 股缠论分析技能，支持多周期结构分析、买卖点识别、背驰检测与技术指标。
-version: 3.1.0
+version: 3.9.0
 author: chanlun.rs
 
 capabilities:
@@ -8,10 +8,23 @@ capabilities:
   - structure_analysis
   - buy_sell_signal_detection
   - divergence_detection
+  - divergence_evidence_matrix
+  - core_signal_provenance
+  - trend_evidence_analysis
+  - standard_signal_contract
+  - signal_schema_validation
+  - confirmation_state_machine
+  - golden_regression
   - technical_indicators
   - cross_period_resonance
   - stop_loss_factory
   - multi_level_expansion
+  - data_quality_validation
+  - semantic_strategy_summary
+  - csv_multi_period_input
+  - eltdx_pagination
+  - eltdx_adjustment_mode
+  - dependency_self_check
 
 supported_periods:
   - 1m
@@ -24,10 +37,11 @@ supported_periods:
   - month
 
 dependencies:
-  - chanlun
-  - eltdx
+  - chanlun==2606.73
+  - eltdx==3.2.2
+  - PyYAML==6.0.3
 
-python_version: ">=3.11"
+python_version: "==3.14.7"
 
 # 真实执行入口：scripts/chan_analyzer.py（直接基于 chanlun 核心库）
 usage:
@@ -48,6 +62,28 @@ usage:
       input:
         type: string
         description: CSV 文件路径（csv 模式）
+      input_periods:
+        type: string
+        description: 多周期 CSV 映射，如 day=day.csv,week=week.csv
       code:
         type: string
         description: 股票代码（eltdx 模式，如 sh600519）
+      count:
+        type: integer
+        description: eltdx 原始 K 线总数（超过 800 自动分页）
+      page_size:
+        type: integer
+        description: eltdx 单页数量，范围 1~800
+      max_pages:
+        type: integer
+        description: eltdx 最大分页次数，防止异常游标无限请求
+      adjust:
+        type: string
+        description: eltdx 复权模式，默认 qfq 前复权
+        enum: ["none", "qfq", "hfq", "fixed_qfq", "fixed_hfq"]
+      anchor_date:
+        type: string
+        description: 定点复权锚定日期 YYYY-MM-DD；fixed_qfq/fixed_hfq 必填
+      json:
+        type: boolean
+        description: 输出结构化 JSON；包含 Rust 引擎元数据、数据质量和语义摘要

@@ -23,16 +23,37 @@
     python chan_analyzer.py --source csv --input test_data.csv --symbol 000001 --freq day --json
     python chan_analyzer.py --source eltdx --code sh600519 --freq day
 
-依赖：chanlun（核心库）、eltdx（在线数据源，可选）。
+依赖：chanlun==2606.73（核心库）、eltdx==3.2.2（在线数据源，可选）。
 """
 
 import argparse
 import csv
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
-from chanlun import K线, 立体分析器, 缠论配置, 观察者, 虚线, 笔, 线段, 中枢, 背驰分析, 买卖点
+from chanlun import 缠论配置
+
+try:
+    from rust_adapter import (
+        K线, 立体分析器, 观察者, 虚线, 笔, 线段, 中枢, 背驰分析, 买卖点,
+        append_raw_kline, get_observer,
+    )
+    from data_quality import inspect_rows
+    from semantic import build_period_summary
+    from signal_contract import normalize_signals
+    from signal_schema import validate_standard_signals
+    from strategy_plan import build_strategy_plan
+except ImportError:  # pragma: no cover - package-style import fallback
+    from .rust_adapter import (
+        K线, 立体分析器, 观察者, 虚线, 笔, 线段, 中枢, 背驰分析, 买卖点,
+        append_raw_kline, get_observer,
+    )
+    from .data_quality import inspect_rows
+    from .semantic import build_period_summary
+    from .signal_contract import normalize_signals
+    from .signal_schema import validate_standard_signals
+    from .strategy_plan import build_strategy_plan
 
 # ---------------------------------------------------------------------------
 # 周期映射：中文/英文名 -> 秒
@@ -133,17 +154,88 @@ def load_csv_data(file_path: str) -> list:
     return data
 
 
-def load_eltdx_data(code: str, freq: str, start_date: str = None, end_date: str = None, count: int = 800) -> list:
-    """从 eltdx（通达信 7709 协议）获取 K 线。需要 `pip install eltdx` 且网络可达。
+def load_csv_periods(spec: str) -> dict:
+    """Load multiple CSV files from ``period=path,period=path`` syntax."""
 
-    eltdx 3.x API：`TdxClient` 支持上下文管理器（自动连接/关闭），
-    取 K 线走 `client.bars.get(code, period=..., count=...)`，返回对象含 `.bars`
-    （KlineBar 元组，字段 time/open/high/low/close/volume_lots）。
+    if not spec:
+        return {}
+    result = {}
+    for item in spec.split(","):
+        item = item.strip()
+        if not item or "=" not in item:
+            raise SystemExit(
+                "错误：--input_periods 格式应为 day=day.csv,week=week.csv"
+            )
+        freq, path = item.split("=", 1)
+        seconds = period_to_seconds(freq.strip())
+        if seconds in result:
+            raise SystemExit(f"错误：--input_periods 重复声明周期 {freq!r}")
+        if not path.strip():
+            raise SystemExit(f"错误：周期 {freq!r} 未提供 CSV 路径")
+        result[seconds] = load_csv_data(path.strip())
+    return result
+
+
+_ELTDX_KLINE_PAGE_SIZE = 800
+_ELTDX_DEFAULT_MAX_PAGES = 200
+_ELTDX_ADJUST_CHOICES = ("none", "qfq", "hfq", "fixed_qfq", "fixed_hfq")
+_ELTDX_DEFAULT_ADJUST = "qfq"
+
+
+def _normalize_eltdx_adjust(adjust: str = None) -> str:
+    """规范化 eltdx 复权模式；默认前复权。"""
+
+    mode = _ELTDX_DEFAULT_ADJUST if adjust in (None, "") else str(adjust).strip().lower()
+    if mode not in _ELTDX_ADJUST_CHOICES:
+        raise SystemExit(
+            "错误：--adjust 只支持 none/qfq/hfq/fixed_qfq/fixed_hfq"
+        )
+    return mode
+
+
+def load_eltdx_data(
+    code: str,
+    freq: str,
+    start_date: str = None,
+    end_date: str = None,
+    count: int = 800,
+    page_size: int = _ELTDX_KLINE_PAGE_SIZE,
+    max_pages: int = _ELTDX_DEFAULT_MAX_PAGES,
+    adjust: str = _ELTDX_DEFAULT_ADJUST,
+    anchor_date: str = None,
+) -> list:
+    """从 eltdx 分页获取 K 线并合并为一条有序序列。
+
+    通达信 7709 的单页 K 线请求最多 800 根。``count`` 表示本次分析最多
+    请求的原始 K 线总数，超过 800 时按 ``start`` 游标分页；分页结果随后
+    去重、按时间升序排列，再执行日期范围裁剪。所有页面在进入 Rust 核心
+    前会合并，避免在页面边界切断笔、线段或中枢。
+
+    ``adjust`` 默认 ``qfq``（前复权），用于保持历史走势连续；需要与真实
+    未复权价格对齐时可显式传 ``none``。``page_size`` 用于调试或降低单页
+    负载，必须在 1~800 之间；``max_pages`` 是防止服务端游标异常导致无限
+    请求的保护阈值。
     """
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise SystemExit("错误：--count 必须是大于 0 的整数")
+    if (
+        isinstance(page_size, bool)
+        or not isinstance(page_size, int)
+        or not 1 <= page_size <= _ELTDX_KLINE_PAGE_SIZE
+    ):
+        raise SystemExit(
+            f"错误：--page-size 必须是 1~{_ELTDX_KLINE_PAGE_SIZE} 的整数"
+        )
+    if isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages <= 0:
+        raise SystemExit("错误：--max-pages 必须是大于 0 的整数")
+    adjust_mode = _normalize_eltdx_adjust(adjust)
+    if adjust_mode.startswith("fixed_") and not anchor_date:
+        raise SystemExit("错误：fixed_qfq/fixed_hfq 需要同时提供 --anchor-date")
+
     try:
         from eltdx import TdxClient
     except ImportError:
-        raise SystemExit("错误：需要安装 eltdx 库：pip install eltdx")
+        raise SystemExit("错误：需要安装 eltdx 库：pip install eltdx==3.2.2")
 
     period_map = {
         60: "1m", 300: "5m", 900: "15m", 1800: "30m",
@@ -152,45 +244,97 @@ def load_eltdx_data(code: str, freq: str, start_date: str = None, end_date: str 
     seconds = period_to_seconds(freq)
     period = period_map.get(seconds, "day")
 
-    data = []
+    # 以时间字符串为键去重。服务端偶发重叠页时，保留最后一次返回的记录，
+    # 最终仍按时间升序喂给 Rust；这比按页直接拼接更安全。
+    rows_by_time = {}
+    requested = 0
+    pages = 0
     try:
         with TdxClient(timeout=15) as client:
-            series = client.bars.get(code, period=period, count=count)
-            for bar in series.bars:
-                data.append({
-                    "date": bar.time.strftime("%Y-%m-%d"),
-                    "open": bar.open,
-                    "high": bar.high,
-                    "low": bar.low,
-                    "close": bar.close,
-                    "volume": bar.volume_lots,
-                })
+            while requested < count:
+                if pages >= max_pages:
+                    raise RuntimeError(
+                        f"分页超过 --max-pages={max_pages}，已获取 {requested} 根"
+                    )
+                batch_count = min(page_size, count - requested)
+                # 7709 单页上限为 800；显式传 start/count，兼容不支持
+                # all_pages 的旧客户端，同时让每个分页请求可审计。
+                series = client.bars.get(
+                    code,
+                    period=period,
+                    start=requested,
+                    count=batch_count,
+                    adjust=adjust_mode,
+                    anchor_date=anchor_date,
+                )
+                page_bars = list(getattr(series, "bars", ()) or ())
+                if not page_bars:
+                    break
+
+                pages += 1
+                before = len(rows_by_time)
+                for bar in page_bars:
+                    timestamp = getattr(bar, "time", None)
+                    if timestamp is None:
+                        continue
+                    date_text = timestamp.isoformat(sep=" ")
+                    rows_by_time[date_text] = {
+                        # 保留分钟级原始时间，Rust 核心内部仍会按周期边界对齐。
+                        "date": date_text,
+                        "open": bar.open,
+                        "high": bar.high,
+                        "low": bar.low,
+                        "close": bar.close,
+                        "volume": bar.volume_lots,
+                    }
+
+                # 正常情况下每页都应推进游标。若服务端重复返回同一页，
+                # 继续请求只会形成死循环，直接报出可定位错误。
+                requested += len(page_bars)
+                if len(rows_by_time) == before:
+                    raise RuntimeError("分页未返回新的时间序列，已停止以避免死循环")
+                # 与 eltdx 的 all_pages 语义保持一致：短页不代表历史结束，
+                # 只有空页才结束；这样可兼容服务端临时返回短页的情况。
     except Exception as e:
         raise SystemExit(f"错误：从 eltdx 获取数据失败：{e}")
 
-    # 按日期范围裁剪
+    data = [
+        rows_by_time[key]
+        for key in sorted(rows_by_time)
+    ]
+
+    # 按日期范围裁剪。CLI 允许只传 YYYY-MM-DD；结束日期应包含该交易日
+    # 的全部分钟/日线记录，不能直接与带时分的 ISO 字符串比较。
+    start_bound = str(start_date).strip() if start_date else None
+    end_bound = str(end_date).strip() if end_date else None
+    if end_bound and len(end_bound) == 10 and end_bound[4] == "-" and end_bound[7] == "-":
+        end_bound = end_bound + " 23:59:59.999999"
     if start_date:
-        data = [d for d in data if d["date"] >= start_date]
+        data = [d for d in data if d["date"] >= start_bound]
     if end_date:
-        data = [d for d in data if d["date"] <= end_date]
+        data = [d for d in data if d["date"] <= end_bound]
     return data
 
 
 # ---------------------------------------------------------------------------
 # 取数：全部走核心库原生字段，不做二次推断
 # ---------------------------------------------------------------------------
-def _fmt_ts(ts) -> str:
-    """时间戳 -> 可读日期。
+_CHINA_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
-    核心库（Rust 绑定）内部把时间戳对齐到 UTC 日边界（即北京时间 08:00），
-    因此这里必须用 UTC 时区反解，否则日期会整体偏移 +8 小时导致错位。
+
+def _fmt_ts(ts) -> str:
+    """时间戳 -> 中国标准时间（Asia/Shanghai）可读日期。
+
+    Rust 核心内部使用 Unix 秒级时间戳；交易数据和用户报告均采用北京时间。
+    这里统一按北京时间展示，避免把 11:05/14:15 等交易时段错误显示为 UTC 的
+    03:05/06:15。内部时间戳仍保持原值，不影响排序、周期计算或共振匹配。
     """
     if ts is None:
         return "-"
     try:
         if isinstance(ts, (int, float)):
-            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(ts, tz=_CHINA_TZ).strftime("%Y-%m-%d %H:%M")
+        return datetime.fromtimestamp(int(ts), tz=_CHINA_TZ).strftime("%Y-%m-%d %H:%M")
     except (ValueError, OSError, OverflowError):
         return str(ts)
 
@@ -231,50 +375,405 @@ def _ts_val(ts) -> int:
         return 0
 
 
-def _trend_type(obs: 观察者) -> str:
-    """走势类型判定：盘整 / 趋势（上涨/下跌）。
+def _segment_internal_pen_hub_items(obs: 观察者) -> list[tuple[object, object]]:
+    """Return ``(segment, hub)`` pairs for segment-internal pen hubs only.
 
-    缠论标准：≥2 个依次同向、区间无重叠的中枢 = 趋势；否则 = 盘整。
-    判据用「相邻中枢区间的位置关系」（依次上移/下移且无重叠），
-    而非中枢的「方向」字段（下跌趋势的中枢方向翻转后可能不一致）。
+    Rust exposes two different pen-hub views:
+    - ``obs.笔_中枢序列``: a raw global pen-hub sequence across all pens;
+    - ``seg.合_中枢序列``: pen hubs calculated inside each segment.
+
+    The skill uses the second view for trend context and buy/sell-point
+    classification.  The global sequence is intentionally excluded from this
+    helper so it cannot silently participate in signal judgment.
     """
-    hubs = obs.笔_中枢序列
-    if len(hubs) < 2:
-        return "盘整"
-    up = down = 0
-    for i in range(len(hubs) - 1):
+
+    items = []
+    seen = set()
+    for seg_i, seg in enumerate(getattr(obs, "线段序列", [])):
+        for z_i, z in enumerate(getattr(seg, "合_中枢序列", [])):
+            key = (
+                getattr(seg, "序号", seg_i),
+                getattr(z, "序号", z_i),
+                _ts_val(getattr(getattr(z, "文", None), "时间戳", None)),
+                _ts_val(getattr(getattr(z, "武", None), "时间戳", None)),
+                getattr(z, "高", None),
+                getattr(z, "低", None),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append((seg, z))
+    return items
+
+
+def _segment_internal_pen_hubs(obs: 观察者) -> list:
+    """Return only segment-internal combined pen hubs, in segment/time order."""
+
+    return [z for _, z in _segment_internal_pen_hub_items(obs)]
+
+
+def _trend_analysis(obs: 观察者) -> dict:
+    """Analyze trend type using segment-internal pen hubs.
+
+    The binding does not expose a single canonical ``走势类型`` property.  For
+    buy/sell-point semantics this skill deliberately uses only pen hubs inside
+    segments (``seg.合_中枢序列``).  The raw global ``obs.笔_中枢序列`` is not a
+    signal source.
+    """
+
+    source = "线段内部笔中枢"
+    hubs = _segment_internal_pen_hubs(obs)
+    transitions = []
+    up = down = overlap = 0
+    for i in range(max(0, len(hubs) - 1)):
         z0, z1 = hubs[i], hubs[i + 1]
-        if z1.低 > z0.高:      # z1 整体在 z0 上方 → 上移
+        if z1.低 > z0.高:
+            relation = "上移"
             up += 1
-        elif z1.高 < z0.低:    # z1 整体在 z0 下方 → 下移
+        elif z1.高 < z0.低:
+            relation = "下移"
             down += 1
-        # 否则区间重叠 = 中枢扩展（盘整）
-    if up >= 1 and down == 0:
-        return "趋势"
-    if down >= 1 and up == 0:
-        return "趋势"
-    return "盘整"
+        else:
+            relation = "重叠/扩展"
+            overlap += 1
+        transitions.append({
+            "前中枢": getattr(z0, "序号", i),
+            "后中枢": getattr(z1, "序号", i + 1),
+            "关系": relation,
+        })
+    if up and not down and not overlap:
+        kind, direction = "趋势", "上涨"
+    elif down and not up and not overlap:
+        kind, direction = "趋势", "下跌"
+    else:
+        kind, direction = "盘整", "震荡/未定"
+    return {
+        "类型": kind,
+        "方向": direction,
+        "判据来源": source,
+        "中枢数量": len(hubs),
+        "上移次数": up,
+        "下移次数": down,
+        "重叠次数": overlap,
+        "相邻关系": transitions,
+    }
 
 
-def _first_type_ts(obs: 观察者):
-    """找第一个一类买卖点（背驰点）的时间戳，用于 T3A/T3B 时序判定。"""
+def _trend_type(obs: 观察者) -> str:
+    """Backward-compatible trend label."""
+
+    return _trend_analysis(obs)["类型"]
+
+
+def _hub_end_ts(z) -> int:
+    """Return the latest available timestamp for a hub boundary."""
+
+    return max(
+        _ts_val(getattr(getattr(z, "文", None), "时间戳", None)),
+        _ts_val(getattr(getattr(z, "武", None), "时间戳", None)),
+    )
+
+
+def _source_hubs(obs: 观察者, trend_info: dict) -> list:
+    source = (trend_info or {}).get("判据来源", "线段内部笔中枢")
+    if source in ("线段内部笔中枢", "笔中枢"):
+        return _segment_internal_pen_hubs(obs)
+    return []
+
+
+def _hub_core_completeness(z):
+    """Return Rust's special ``完整性("实")`` evidence when available.
+
+    ``中枢.完整性("实")`` is not the same as "has a valid three-element
+    overlap".  For a 笔中枢 it normally means that a third buy/sell line has
+    appeared; for a 线段中枢 it checks an internal departure.  It is useful
+    evidence for interpretation, but it is deliberately *not* the A/B
+    formation gate.
+    """
+
+    method = getattr(z, "完整性", None)
+    if not callable(method):
+        return None
+    try:
+        return bool(method("实"))
+    except BaseException:
+        return None
+
+
+def _formed_valid_hub(z) -> bool:
+    """Whether a hub is formed and still valid for an A/B structure.
+
+    The core puts invalidated hubs out of its public hub sequences.  The
+    explicit checks below make that contract auditable and also protect the
+    classifier when a compatible binding exposes a partially built object.
+    Importantly, ``完整性("实")`` is *not* checked here: a formed but
+    incomplete hub is still a legitimate A/B in ``a+A+b`` or
+    ``a+A+b+B+c``.
+    """
+
+    base = getattr(z, "基础序列", None)
+    if base is not None:
+        try:
+            if len(base) < 3:
+                return False
+        except BaseException:
+            return False
+
+    # Some compatible bindings may expose an explicit validity flag.  Treat
+    # an explicit False as invalid; absence of the flag means the object is
+    # already filtered by the core hub sequence.
+    validity = getattr(z, "有效性", None)
+    if validity is not None:
+        try:
+            value = validity() if callable(validity) else validity
+        except BaseException:
+            return False
+        if value is False:
+            return False
+        if value is not None and not bool(value):
+            return False
+    return True
+
+
+def _hub_status(z) -> str:
+    try:
+        return z.当前状态() if hasattr(z, "当前状态") else ""
+    except BaseException:
+        return ""
+
+
+def _hub_base_stroke_ids(z) -> list:
+    base = getattr(z, "基础序列", None)
+    if base is None:
+        return []
+    ids = []
+    try:
+        iterator = list(base)
+    except BaseException:
+        return ids
+    for item in iterator:
+        ids.append(getattr(item, "序号", None))
+    return ids
+
+
+def _third_line_detail(z):
+    line = getattr(z, "第三买卖线", None)
+    if line is None:
+        return None
+    try:
+        return {
+            "序号": getattr(line, "序号", None),
+            "方向": _dir_name(getattr(line, "方向", None)),
+            "高": getattr(line, "高", None),
+            "低": getattr(line, "低", None),
+            "文": _fmt_ts(getattr(getattr(line, "文", None), "时间戳", None)),
+            "武": _fmt_ts(getattr(getattr(line, "武", None), "时间戳", None)),
+        }
+    except BaseException:
+        return {"可用": True}
+
+
+def _hub_detail(z, seg=None) -> dict:
+    row = {
+        "序号": getattr(z, "序号", None),
+        "高": getattr(z, "高", None),
+        "低": getattr(z, "低", None),
+        "高高": getattr(z, "高高", None),
+        "低低": getattr(z, "低低", None),
+        "状态": _hub_status(z),
+        "已形成有效": _formed_valid_hub(z),
+        "核心完整性_实": _hub_core_completeness(z),
+    }
+    if seg is not None:
+        row["所属线段"] = getattr(seg, "序号", None)
+        row["所属线段方向"] = _dir_name(getattr(seg, "方向", None))
+    base_ids = _hub_base_stroke_ids(z)
+    if base_ids:
+        row["基础笔序号"] = base_ids
+    third = _third_line_detail(z)
+    if third is not None:
+        row["第三买卖线"] = third
+    return row
+
+
+def _first_class_context(
+    stroke, obs: 观察者, trend_info: dict, is_buy: bool, has_divergence: bool
+) -> tuple[bool, dict]:
+    """Validate the structural template for a Chan-theory first-class point.
+
+    A divergence result is only auxiliary evidence.  The structural gate is:
+    trend ``a+A+b+B+c`` (two sequential non-overlapping hubs) or consolidation
+    ``a+A+b`` (one hub), with the terminal stroke after the last hub.
+    """
+
+    trend_info = trend_info or {}
+    trend_type = trend_info.get("类型")
+    trend_direction = trend_info.get("方向")
+    expected_direction = "下跌" if is_buy else "上涨"
+    stroke_ts = _ts_val(stroke.武.时间戳)
+    preceding_hubs = [
+        z for z in _source_hubs(obs, trend_info)
+        if _formed_valid_hub(z) and _hub_end_ts(z) < stroke_ts
+    ]
+    hub_count = len(preceding_hubs)
+    last_hub_ts = _hub_end_ts(preceding_hubs[-1]) if preceding_hubs else 0
+    if trend_type == "趋势" and hub_count >= 2:
+        structure_template = "a+A+b+B+c"
+        structure_gate = True
+    elif trend_type == "盘整" and hub_count >= 1:
+        structure_template = "a+A+b"
+        structure_gate = True
+    else:
+        structure_template = "未形成一类结构模板"
+        structure_gate = False
+    checks = {
+        "背驰辅助证据": has_divergence,
+        "结构模板": structure_template,
+        "结构门槛": structure_gate,
+        "前置已形成有效中枢数量": hub_count,
+        "前置中枢序号": [
+            getattr(z, "序号", i) for i, z in enumerate(preceding_hubs)
+        ],
+        "前置中枢核心完整性": [
+            {
+                "序号": getattr(z, "序号", i),
+                "完整性_实": _hub_core_completeness(z),
+            }
+            for i, z in enumerate(preceding_hubs)
+        ],
+        "走势类型": trend_type,
+        "走势方向": trend_direction,
+        "要求走势方向": expected_direction,
+        "方向匹配": (
+            trend_type == "盘整"
+            or trend_direction == expected_direction
+        ),
+        "最后中枢后": bool(last_hub_ts and stroke_ts > last_hub_ts),
+        "笔端时间": _fmt_ts(stroke.武.时间戳),
+        "最后中枢结束时间": _fmt_ts(last_hub_ts) if last_hub_ts else None,
+    }
+    ok = (
+        structure_gate
+        and (
+            trend_type == "盘整"
+            or trend_direction == expected_direction
+        )
+        and checks["最后中枢后"]
+    )
+    return ok, checks
+
+
+def _first_type_ts(obs: 观察者, trend_info: dict = None):
+    """找第一个严格一类买卖点的时间戳，用于 T3A/T3B 时序判定。"""
+    trend_info = trend_info or _trend_analysis(obs)
     for s in obs.笔序列:
         try:
             meaningful, reason = 虚线.买卖意义(s, obs)
         except BaseException:
             meaningful, reason = False, ""
-        if meaningful and "背驰" in reason:
+        if not meaningful:
+            continue
+        d = _dir_name(s.方向)
+        is_buy = d == "向下"
+        is_first, _ = _first_class_context(
+            s, obs, trend_info, is_buy, "背驰" in reason
+        )
+        if is_first:
             return _ts_val(s.武.时间戳)
     return None
 
 
-def _classify_signals(obs: 观察者) -> list:
-    """识别 T 系列买卖点（六类买卖点 = 走势类型 + 背驰信息对基础买卖点的精确化）。
+def _core_buy_sell_evidence(obs: 观察者) -> dict:
+    """Probe the binding's native per-Chan-K buy/sell information.
+
+    Some chanlun builds expose ``买卖点信息`` but leave it empty because the
+    observer configuration does not attach generated objects to each candle.
+    We report that fact explicitly instead of silently treating the heuristic
+    classifier as an official signal sequence.
+    """
+
+    rows = []
+    for ck in getattr(obs, "缠论K线序列", []):
+        try:
+            info = getattr(ck, "买卖点信息", None)
+            if callable(info):
+                info = info()
+            if info:
+                rows.append({
+                    "时间": _fmt_ts(getattr(ck, "时间戳", None)),
+                    "信息": str(info),
+                })
+        except BaseException:
+            continue
+    method_status = {}
+    sample_stroke = next(iter(getattr(obs, "笔序列", [])), None)
+    for name in ("买卖点配置匹配", "买卖点任意匹配",
+                 "买卖点全量匹配", "买卖点相对匹配",
+                 "缠K买卖点模式"):
+        method_status[name] = bool(hasattr(虚线, name))
+    return {
+        "可用": bool(rows),
+        "数量": len(rows),
+        "样例": rows[:10],
+        "匹配API": method_status,
+        "生成工厂": bool(hasattr(买卖点, "生成买卖点")),
+        "匹配样例": (
+            _core_signal_matching(sample_stroke, obs) if sample_stroke else {}
+        ),
+        "说明": (
+            "Rust 绑定在当前配置下直接挂载了买卖点信息"
+            if rows else
+            "当前配置/绑定未在缠论K线上挂载买卖点信息；买卖点由核心判据与 Skill 分类整理"
+        ),
+    }
+
+
+def _core_signal_matching(stroke_or_line, obs: 观察者) -> dict:
+    """Return official indicator-matching predicates for a signal endpoint."""
+
+    if stroke_or_line is None:
+        return {}
+    try:
+        ck = stroke_or_line.武.中
+    except BaseException:
+        return {}
+    if ck is None:
+        return {}
+    config = getattr(obs, "配置", None)
+    result = {}
+    for label, method_name, args in (
+        ("配置", "买卖点配置匹配", (ck, config)),
+        ("任意", "买卖点任意匹配", (ck,)),
+        ("全量", "买卖点全量匹配", (ck,)),
+        ("相对", "买卖点相对匹配", (ck,)),
+    ):
+        method = getattr(虚线, method_name, None)
+        if method is None:
+            result[label] = None
+            continue
+        try:
+            result[label] = bool(method(*args))
+        except BaseException:
+            result[label] = None
+    try:
+        info = getattr(ck, "买卖点信息", None)
+        if callable(info):
+            info = info()
+        result["原生买卖点信息"] = list(info) if info else []
+    except BaseException:
+        result["原生买卖点信息"] = []
+    return result
+
+
+def _classify_signals(
+    obs: 观察者, trend_info: dict = None, divergence_results: list = None
+) -> list:
+    """识别 T 系列买卖点（结构类型优先，背驰仅作辅助证据）。
 
     在 6 类基础买卖点（一/二/三 × 买/卖）之上，按走势类型与回踩次序二次细分：
-    - 一类买卖点（背驰点）：
-        T1  = 趋势背驰（≥2 个依次同向、区间无重叠的中枢）
-        T1P = 盘整背驰（0~1 个中枢）
+    - 一类买卖点（缠论结构末端 + 背驰辅助确认）：
+        T1  = ``a+A+b+B+c``，趋势至少含两个依次同向且不重叠的中枢；
+        T1P = ``a+A+b``，盘整含一个有效中枢。
     - 二类买卖点（有买卖意义、非背驰）：
         T2  = 标准二类（一类之后的第一次回踩不破）
         T2S = 类二类（一类之后的后续回踩不破）
@@ -291,11 +790,18 @@ def _classify_signals(obs: 观察者) -> list:
     - `止损` —— 由 `买卖点` factory 构造的官方止损信息（失效K线/有效性/与MACD柱子分型匹配）
     """
     signals = []
-    trend = _trend_type(obs)
-    first_ts = _first_type_ts(obs)
+    trend_info = trend_info or _trend_analysis(obs)
+    trend = trend_info["类型"]
+    first_ts = _first_type_ts(obs, trend_info)
+    divergence_by_stroke = {
+        (row.get("index"), row.get("direction")): row
+        for row in (divergence_results or [])
+        if row.get("kind") == "笔内背驰"
+    }
 
-    # 三类买卖点：来自中枢第三买卖线
-    for z in obs.笔_中枢序列:
+    # 三类买卖点：来自线段内部笔中枢的第三买卖线。
+    # 原始全局 obs.笔_中枢序列 只作底层审计，不参与买卖点判断。
+    for z in _segment_internal_pen_hubs(obs):
         line = z.第三买卖线
         if line is None:
             continue
@@ -315,6 +821,18 @@ def _classify_signals(obs: 观察者) -> list:
         sig = {
             "kind": kind,
             "base": "三买" if is_buy else "三卖",
+            "来源": "rust_core+skill_classifier",
+            "置信度": "高",
+            "结构来源": "rust_core",
+            "类型来源": "skill_classifier",
+            "确认级别": "候选",
+            "核心判据": {
+                "第三买卖线": True,
+                "中枢序号": z.序号,
+                "中枢位置": "上方" if is_buy else "下方",
+                "结构中枢来源": "线段内部笔中枢",
+            },
+            "核心匹配": _core_signal_matching(line, obs),
             "index": line.序号,
             "direction": "向上" if is_buy else "向下",
             "high": line.高, "low": line.低,
@@ -322,13 +840,17 @@ def _classify_signals(obs: 观察者) -> list:
             "reason": reason_text,
             "time": _fmt_ts(line.武.时间戳),
             "止损": _stop_loss_info(line, obs, kind),
+            "止损来源": "rust_factory",
         }
         signals.append(sig)
 
-    # 一/二类：来自具备买卖意义的笔
+    # 一/二类：来自具备买卖意义的笔；背驰只作为一类的辅助证据。
     # 二类按「一类之后的回踩次序」区分：第一次回踩 = T2，后续回踩 = T2S
     buy_stage = 0   # 一买之后出现过的非背驰买点计数
     sell_stage = 0  # 一卖之后出现过的非背驰卖点计数
+    first_seen = {"买": False, "卖": False}
+    first_boundary = {"买": None, "卖": None}
+    post_hub_meaningful = {"买": False, "卖": False}
     for s in obs.笔序列:
         try:
             meaningful, reason = 虚线.买卖意义(s, obs)
@@ -338,7 +860,24 @@ def _classify_signals(obs: 观察者) -> list:
             continue
         d = _dir_name(s.方向)
         is_buy = d == "向下"  # 向下笔终点是底分型 → 买点语境
-        is_first = "背驰" in reason  # 背驰 → 一类
+        side = "买" if is_buy else "卖"
+        divergence = divergence_by_stroke.get((s.序号, d), {})
+        divergence_strength = divergence.get("强度", "无")
+        has_divergence = "背驰" in reason or bool(divergence)
+        structural_first, first_checks = _first_class_context(
+            s, obs, trend_info, is_buy, has_divergence
+        )
+        # A first-class point must be the first meaningful terminal leg after
+        # the final hub in that direction; later divergence remains evidence,
+        # not another first-class point.
+        after_last_hub = bool(first_checks.get("最后中枢后"))
+        is_first = (
+            structural_first
+            and not first_seen[side]
+            and not post_hub_meaningful[side]
+        )
+        if after_last_hub:
+            post_hub_meaningful[side] = True
         if is_first:
             base = "T1" if trend == "趋势" else "T1P"
             base_label = "一买" if is_buy else "一卖"
@@ -347,7 +886,19 @@ def _classify_signals(obs: 观察者) -> list:
                 buy_stage = 0
             else:
                 sell_stage = 0
+            first_seen[side] = True
         else:
+            # A second-class point is defined relative to an existing first
+            # class.  Pre-first meaningful strokes are not classified as T2.
+            if not first_seen[side]:
+                continue
+            boundary = first_boundary[side]
+            not_break = (
+                boundary is not None
+                and (s.低 >= boundary if is_buy else s.高 <= boundary)
+            )
+            if not not_break:
+                continue
             if is_buy:
                 buy_stage += 1
                 base = "T2" if buy_stage == 1 else "T2S"
@@ -355,19 +906,59 @@ def _classify_signals(obs: 观察者) -> list:
                 sell_stage += 1
                 base = "T2" if sell_stage == 1 else "T2S"
             base_label = "二买" if is_buy else "二卖"
+        signal_reason = reason
+        if is_first:
+            template = first_checks.get("结构模板", "一类结构")
+            divergence_state = "命中" if has_divergence else "未命中/待确认"
+            signal_reason = (
+                f"{template}结构一类候选；"
+                f"背驰辅助证据={divergence_state}；"
+                f"核心买卖意义={reason or '未提供'}"
+            )
         kind = base + ("买" if is_buy else "卖")
         sig = {
             "kind": kind,
             "base": base_label,
+            "来源": "rust_core+skill_classifier",
+            "置信度": (
+                "高" if is_first and divergence_strength in ("强", "内部")
+                else "中" if is_first and has_divergence
+                else "中" if is_first
+                else "中"
+            ),
+            "结构来源": "rust_core",
+            "类型来源": "skill_classifier",
+            "确认级别": "候选",
+            "核心判据": {
+                "买卖意义": True,
+                "理由": reason,
+                "买卖意义用途": "辅助筛选，不定义买卖点类型",
+                "结构中枢来源": "线段内部笔中枢",
+                "背驰辅助证据": has_divergence,
+                "背驰证据": divergence,
+                "一类结构": first_checks if is_first else None,
+                "二类不破": (
+                    None if is_first
+                    else {
+                        "一类端点": first_boundary[side],
+                        "当前端点": s.低 if is_buy else s.高,
+                        "不破": True,
+                    }
+                ),
+            },
+            "核心匹配": _core_signal_matching(s, obs),
             "index": s.序号,
             "direction": d,
             "high": s.高, "low": s.低,
             "break": s.低 if is_buy else s.高,  # 跌破/涨破端点即失效
-            "reason": reason,
+            "reason": signal_reason,
             "time": _fmt_ts(s.武.时间戳),
             "止损": _stop_loss_info(s, obs, kind),
+            "止损来源": "rust_factory",
         }
         signals.append(sig)
+        if is_first:
+            first_boundary[side] = s.低 if is_buy else s.高
 
     signals.sort(key=lambda x: x["index"])
     return signals
@@ -432,7 +1023,87 @@ def _stop_loss_info(stroke_or_line, obs: 观察者, kind: str) -> dict:
     return info
 
 
-def _divergences(obs: 观察者) -> list:
+def _safe_bool(fn):
+    """Run a Rust/PyO3 predicate and normalize failures to None."""
+
+    try:
+        return bool(fn())
+    except BaseException:
+        return None
+
+
+def _kline_position_rows(positions, limit: int = 5) -> list:
+    """Compact K-line/Chan K-line positions returned by Rust helpers."""
+
+    rows = []
+    for k in list(positions or [])[:limit]:
+        base = getattr(k, "标的K线", k)
+        rows.append({
+            "time": _fmt_ts(getattr(base, "时间戳", getattr(k, "时间戳", None))),
+            "high": getattr(k, "高", getattr(base, "最高价", None)),
+            "low": getattr(k, "低", getattr(base, "最低价", None)),
+            "close": getattr(base, "收盘价", None),
+        })
+    return rows
+
+
+def _divergence_evidence_matrix(a, b, obs: 观察者, config: 缠论配置) -> dict:
+    """Build a detailed divergence evidence matrix for two same-direction lines."""
+
+    macd = {
+        mode: _safe_bool(lambda mode=mode: 背驰分析.MACD背驰_OBS(a, b, obs, mode))
+        for mode in ("总", "阳", "阴", "合")
+    }
+    atomic = {
+        "MACD": macd.get("总"),
+        "斜率": _safe_bool(lambda: 背驰分析.斜率背驰(a, b)),
+        "测度": _safe_bool(lambda: 背驰分析.测度背驰(a, b)),
+    }
+    composite = {
+        "全量": _safe_bool(lambda: 背驰分析.全量背驰_OBS(a, b, obs)),
+        "任意": _safe_bool(lambda: 背驰分析.任意背驰_OBS(a, b, obs)),
+        "任选": _safe_bool(lambda: 背驰分析.任选背驰_OBS(a, b, obs)),
+        "配置": _safe_bool(lambda: 背驰分析.配置背驰_OBS(a, b, obs, config)),
+    }
+    modes = {
+        mode: _safe_bool(
+            lambda mode=mode: 背驰分析.背驰模式_OBS(a, b, obs, config, mode)
+        )
+        for mode in ("全量", "任意", "配置", "相对")
+    }
+    atomic_hits = [name for name, value in atomic.items() if value is True]
+    composite_hits = [name for name, value in composite.items() if value is True]
+    mode_hits = [name for name, value in modes.items() if value is True]
+    independent_count = len(atomic_hits)
+    aggregate_count = len(composite_hits) + len(mode_hits)
+    if independent_count >= 2:
+        strength = "强"
+    elif independent_count == 1:
+        strength = "中"
+    elif aggregate_count:
+        strength = "弱"
+    else:
+        strength = "无"
+    return {
+        "成立": bool(atomic_hits or composite_hits or mode_hits),
+        "强度": strength,
+        "证据等级": strength,
+        "独立证据数": independent_count,
+        "聚合确认数": aggregate_count,
+        "成立条件数": independent_count,
+        "原子判据": atomic,
+        "MACD面积方式": macd,
+        "组合判据": composite,
+        "模式判据": modes,
+        "命中": {
+            "原子": atomic_hits,
+            "组合": composite_hits,
+            "模式": mode_hits,
+        },
+    }
+
+
+def _divergences(obs: 观察者, config: 缠论配置) -> list:
     """基于核心库 `背驰分析` 与 `线段.判断线段内部是否背驰` 检测背驰。
 
     线段/笔对象的方法为 classmethod，实例必须作第一个参数传入。
@@ -445,8 +1116,20 @@ def _divergences(obs: 观察者) -> list:
         except BaseException:
             inner = None
         if inner:
+            try:
+                positions = 线段.是否背驰过(seg, obs)
+            except BaseException:
+                positions = []
             results.append({
                 "kind": "线段内部背驰",
+                "来源": "rust_core",
+                "确认": True,
+                "强度": "内部",
+                "证据矩阵": {
+                    "线段内部背驰": True,
+                    "背驰K线数量": len(positions),
+                    "背驰位置": _kline_position_rows(positions),
+                },
                 "index": seg.序号,
                 "direction": _dir_name(seg.方向),
                 "high": seg.高, "low": seg.低,
@@ -460,31 +1143,33 @@ def _divergences(obs: 观察者) -> list:
         if positions:
             results.append({
                 "kind": "笔内背驰",
+                "来源": "rust_core",
+                "确认": True,
+                "强度": "内部",
+                "证据矩阵": {
+                    "笔内背驰": True,
+                    "背驰K线数量": len(positions),
+                    "背驰位置": _kline_position_rows(positions),
+                },
                 "index": s.序号,
                 "direction": _dir_name(s.方向),
                 "high": s.高, "low": s.低,
             })
-    # 相邻线段对之间的 MACD/斜率/测度/全量背驰
+    # 相邻线段对之间的 MACD/斜率/测度/组合/模式背驰证据矩阵
     segs = obs.线段序列
     for i in range(len(segs) - 1):
         a, b = segs[i], segs[i + 1]
         if a.方向 != b.方向:
             continue
-        kinds = []
-        for name, fn in (
-            ("MACD", lambda: 背驰分析.MACD背驰_OBS(a, b, obs)),
-            ("斜率", lambda: 背驰分析.斜率背驰(a, b)),
-            ("测度", lambda: 背驰分析.测度背驰(a, b)),
-            ("全量", lambda: 背驰分析.全量背驰_OBS(a, b, obs)),
-        ):
-            try:
-                if fn():
-                    kinds.append(name)
-            except BaseException:
-                pass
-        if kinds:
+        matrix = _divergence_evidence_matrix(a, b, obs, config)
+        if matrix["成立"]:
+            kinds = matrix["命中"]["原子"] or matrix["命中"]["组合"] or matrix["命中"]["模式"]
             results.append({
                 "kind": "+".join(kinds),
+                "来源": "rust_core",
+                "确认": True,
+                "强度": matrix["强度"],
+                "证据矩阵": matrix,
                 "index": b.序号,
                 "direction": _dir_name(b.方向),
                 "high": b.高, "low": b.低,
@@ -677,21 +1362,39 @@ def analyze(symbol: str, data_by_period: dict, config: 缠论配置 = None) -> d
             periods.insert(0, lower_period(p0))
 
     cfg = config if config is not None else 缠论配置.不推送()
+    quality_by_period = {
+        p: inspect_rows(data_by_period[p], p) for p in seconds_list
+    }
+    unusable = [
+        (p, quality_by_period[p])
+        for p in seconds_list
+        if not quality_by_period[p]["可用于分析"]
+    ]
+    if unusable:
+        p, quality = unusable[0]
+        issue_types = [item.get("类型", "未知") for item in quality.get("问题", [])]
+        raise ValueError(
+            f"{seconds_to_name(p)} 数据质量不满足分析要求："
+            f"{', '.join(issue_types) or '有效K线不足'}"
+        )
+
     engine = 立体分析器(symbol, periods, cfg)
 
     # 分别投喂各周期（直接增加原始K线，无 pending）
     for p in seconds_list:
-        obs = engine._单体分析器[p]
+        obs = get_observer(engine, p)
         for i, row in enumerate(data_by_period[p]):
             ts = _parse_date(row["date"], i)
-            k = K线.创建普K(
-                symbol, ts, row["open"], row["high"], row["low"], row["close"],
-                row["volume"], i, p,
-            )
-            obs.增加原始K线(k)
+            append_raw_kline(obs, symbol, ts, row, i, p)
 
     primary = min(seconds_list)
     result = {
+        "schema_version": "2.0",
+        "engine": {
+            "name": "chanlun",
+            "implementation": "rust-pyo3",
+            "python_compat_layer": True,
+        },
         "symbol": symbol,
         "freq": seconds_to_name(primary),
         "periods": [seconds_to_name(p) for p in seconds_list],
@@ -700,14 +1403,21 @@ def analyze(symbol: str, data_by_period: dict, config: 缠论配置 = None) -> d
     }
 
     for p in seconds_list:
-        obs = engine._单体分析器[p]
+        obs = get_observer(engine, p)
         name = seconds_to_name(p)
+        latest_line = obs.线段序列[-1] if obs.线段序列 else None
+        internal_hub_items = _segment_internal_pen_hub_items(obs)
+        internal_hubs = [z for _, z in internal_hub_items]
+        latest_hub = internal_hubs[-1] if internal_hubs else None
+        trend_info = _trend_analysis(obs)
         detail = {
             "普通K线": len(obs.普通K线序列),
             "缠论K线": len(obs.缠论K线序列),
             "分型": len(obs.分型序列),
             "笔": len(obs.笔序列),
-            "笔中枢": len(obs.笔_中枢序列),
+            "笔中枢": len(internal_hubs),
+            "笔中枢口径": "线段内部合中枢",
+            "原始全局笔中枢": len(getattr(obs, "笔_中枢序列", [])),
             "线段": len(obs.线段序列),
             "中枢": len(obs.中枢序列),
             "扩展线段": len(obs.扩展线段序列),
@@ -717,15 +1427,32 @@ def analyze(symbol: str, data_by_period: dict, config: 缠论配置 = None) -> d
             "扩展线段_扩展线段": len(obs.扩展线段序列_扩展线段),
             "扩展中枢_扩展线段": len(obs.扩展中枢序列_扩展线段),
         }
+        detail["走势类型"] = trend_info["类型"]
+        detail["走势方向"] = trend_info["方向"]
+        detail["走势判据"] = trend_info
+        detail["当前线段"] = (
+            {"序号": latest_line.序号, "方向": _dir_name(latest_line.方向),
+             "高": latest_line.高, "低": latest_line.低,
+             "起点": _fmt_ts(latest_line.文.时间戳),
+             "终点": _fmt_ts(latest_line.武.时间戳)}
+            if latest_line else None
+        )
+        detail["当前中枢"] = (
+            _hub_detail(latest_hub)
+            if latest_hub else None
+        )
         detail["笔序列"] = [
             {"序号": s.序号, "方向": _dir_name(s.方向), "高": s.高, "低": s.低,
              "文": _fmt_ts(s.文.时间戳), "武": _fmt_ts(s.武.时间戳)}
             for s in obs.笔序列[-10:]
         ]
         detail["中枢序列"] = [
-            {"序号": z.序号, "高": z.高, "低": z.低, "高高": z.高高, "低低": z.低低,
-             "状态": z.当前状态() if hasattr(z, "当前状态") else ""}
-            for z in obs.笔_中枢序列[-5:]
+            _hub_detail(z)
+            for z in obs.中枢序列[-5:]
+        ]
+        detail["线段内部笔中枢"] = [
+            _hub_detail(z, seg)
+            for seg, z in internal_hub_items[-10:]
         ]
         # 级别递归序列组（多级别结构，逐层展开计数）
         detail["线段序列组"] = [len(g) for g in obs.线段序列组]
@@ -734,12 +1461,29 @@ def analyze(symbol: str, data_by_period: dict, config: 缠论配置 = None) -> d
         detail["扩展中枢序列组"] = [len(g) for g in obs.扩展中枢序列组]
         detail["混合扩展线段序列组"] = [len(g) for g in obs.混合扩展线段序列组]
         detail["混合扩展中枢序列组"] = [len(g) for g in obs.混合扩展中枢序列组]
-        detail["买卖点"] = _classify_signals(obs)[-10:]
-        detail["背驰"] = _divergences(obs)[-10:]
+        detail["核心买卖点信息"] = _core_buy_sell_evidence(obs)
+        detail["背驰"] = _divergences(obs, cfg)[-10:]
+        detail["买卖点"] = _classify_signals(
+            obs, trend_info, detail["背驰"]
+        )[-10:]
+        detail["标准信号"] = normalize_signals(
+            detail["买卖点"], name, trend_info
+        )
+        detail["标准信号校验"] = validate_standard_signals(
+            detail["标准信号"], name
+        )
+        if not detail["标准信号校验"]["有效"]:
+            errors = "；".join(detail["标准信号校验"]["错误"])
+            raise ValueError(f"{name} 标准信号契约校验失败：{errors}")
         detail["MACD面积"] = _macd_area(obs)
         detail["指标_最近"] = _indicator_tail(obs, 3)
         # 多级别展开（审计 Stage 3-13）
         detail["多级别展开"] = _multi_level_detail(obs)
+        detail["数据质量"] = quality_by_period[p]
+        detail["语义摘要"] = build_period_summary(
+            detail, quality_by_period[p]
+        )
+        detail["策略计划"] = build_strategy_plan(detail)
         result["periods_detail"][name] = detail
 
     # 跨周期共振（审计 Stage 3-15）
@@ -754,11 +1498,28 @@ def _parse_date(date_str: str, fallback: int) -> int:
     （北京时间）的 00:00 生成时间戳，会被向下对齐到「前一个 UTC 日」，导致
     日期整体偏移 -1 天。因此这里用 UTC 00:00 生成时间戳（等价于本地时间戳 +8h）。
     """
-    try:
-        return int(datetime.strptime(date_str, "%Y-%m-%d")
-                   .replace(tzinfo=timezone.utc).timestamp())
-    except (ValueError, TypeError):
-        return fallback
+    if isinstance(date_str, datetime):
+        parsed = date_str
+    else:
+        text = str(date_str).strip()
+        parsed = None
+        for fmt in (
+            "%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M",
+        ):
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                pass
+        if parsed is None:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                return fallback
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +1529,16 @@ def render_text(result: dict) -> str:
     lines = []
     lines.append("=" * 64)
     lines.append(f"  {result['symbol']} 缠论分析（{result['freq']}，周期组 {result['periods']}）")
+    source_meta = result.get("data_source", {})
+    if source_meta:
+        lines.append(
+            f"  数据源={source_meta.get('source', '-')}"
+            f"  复权={source_meta.get('复权模式', '-')}"
+            + (
+                f"  锚定日期={source_meta['anchor_date']}"
+                if source_meta.get("anchor_date") else ""
+            )
+        )
     lines.append("=" * 64)
 
     for name, d in result["periods_detail"].items():
@@ -775,8 +1546,40 @@ def render_text(result: dict) -> str:
         lines.append(f"--- {name} ---")
         lines.append(f"  K线 {d['普通K线']}  缠K {d['缠论K线']}  分型 {d['分型']}  "
                      f"笔 {d['笔']}  笔中枢 {d['笔中枢']}")
+        lines.append(
+            f"  笔中枢口径：{d.get('笔中枢口径', '未知')}"
+            f"（原始全局笔中枢 {d.get('原始全局笔中枢', 0)}，仅审计）"
+        )
         lines.append(f"  线段 {d['线段']}  中枢 {d['中枢']}  扩展线段 {d['扩展线段']}  "
                      f"扩展中枢 {d['扩展中枢']}")
+        lines.append(f"  走势类型：{d.get('走势类型', '未知')} "
+                     f"方向={d.get('走势方向', '未知')}")
+        trend_evidence = d.get("走势判据", {})
+        if trend_evidence:
+            lines.append(
+                f"  走势判据：{trend_evidence.get('判据来源', '未知')} "
+                f"上移={trend_evidence.get('上移次数', 0)} "
+                f"下移={trend_evidence.get('下移次数', 0)} "
+                f"重叠={trend_evidence.get('重叠次数', 0)}"
+            )
+        core_signal = d.get("核心买卖点信息", {})
+        if core_signal:
+            lines.append(
+                f"  核心买卖点挂载：{'是' if core_signal.get('可用') else '否'}"
+            )
+        quality = d.get("数据质量", {})
+        if quality.get("问题"):
+            lines.append(f"  数据质量警告：{len(quality['问题'])} 项")
+        contract = d.get("标准信号校验", {})
+        if contract:
+            lines.append(
+                f"  标准信号校验：{'通过' if contract.get('有效') else '失败'}"
+                f"（错误 {len(contract.get('错误', []))} 项）"
+            )
+        semantic = d.get("语义摘要", {})
+        for interpretation in semantic.get("解释", [])[:2]:
+            lines.append(f"  语义判断：{interpretation.get('结论', '-')}"
+                         f"（{interpretation.get('确定性', '未知')}）")
 
         if d["笔序列"]:
             lines.append("  最近笔：")
@@ -788,12 +1591,25 @@ def render_text(result: dict) -> str:
             for z in d["中枢序列"]:
                 lines.append(f"    中枢#{z['序号']} 区间 [{z['低']:.2f} ~ {z['高']:.2f}] "
                              f"极值 [{z['低低']:.2f} ~ {z['高高']:.2f}] {z['状态']}")
+        if d.get("线段内部笔中枢"):
+            lines.append("  线段内部笔中枢：")
+            for z in d["线段内部笔中枢"]:
+                seg = z.get("所属线段", "-")
+                lines.append(
+                    f"    线段#{seg} 笔中枢#{z['序号']} "
+                    f"区间 [{z['低']:.2f} ~ {z['高']:.2f}] "
+                    f"极值 [{z['低低']:.2f} ~ {z['高高']:.2f}] {z['状态']}"
+                )
         if d["买卖点"]:
             lines.append("  买卖点（T 系列）：")
             for s in d["买卖点"]:
                 line = (f"    {s['kind']}（{s['base']}） 笔#{s['index']} {s['direction']} "
                         f"[{s['low']:.2f} ~ {s['high']:.2f}] "
                         f"破位 {s['break']:.2f} 时间={s.get('time', '-')}")
+                line += (
+                    f" [结构={s.get('结构来源', '-')}|类型={s.get('类型来源', '-')}"
+                    f"|确认={s.get('确认级别', '-')}|止损={s.get('止损来源', '-')}]"
+                )
                 # 止损信息（审计 Stage 2-9）
                 stop = s.get("止损", {})
                 if stop:
@@ -805,7 +1621,15 @@ def render_text(result: dict) -> str:
         if d["背驰"]:
             lines.append("  背驰：")
             for v in d["背驰"]:
-                lines.append(f"    {v['kind']} #{v['index']} {v['direction']}")
+                matrix = v.get("证据矩阵", {})
+                strength = v.get("强度")
+                extra = f" 强度={strength}" if strength else ""
+                if isinstance(matrix, dict) and matrix.get("命中"):
+                    hits = matrix["命中"]
+                    hit_text = ",".join(hits.get("原子", []) + hits.get("组合", []))
+                    if hit_text:
+                        extra += f" 命中={hit_text}"
+                lines.append(f"    {v['kind']} #{v['index']} {v['direction']}{extra}")
         if d.get("MACD面积"):
             lines.append(f"  MACD面积（全序列）: {d['MACD面积']}")
         # 多级别展开（审计 Stage 3-13）
@@ -851,13 +1675,27 @@ def main():
     parser = argparse.ArgumentParser(description="缠论综合分析工具（chanlun 核心库）")
     parser.add_argument("--source", choices=["csv", "eltdx"], default="csv", help="数据源")
     parser.add_argument("--input", type=str, help="CSV 文件路径（csv 模式）")
+    parser.add_argument(
+        "--input_periods", type=str,
+        help="多周期 CSV 映射，如 day=day.csv,week=week.csv；提供后覆盖 --input",
+    )
     parser.add_argument("--code", type=str, help="股票代码（eltdx 模式，如 sh600519）")
     parser.add_argument("--symbol", type=str, default=None,
                         help="标的标识（默认：csv 模式为 000001，eltdx 模式为 code）")
     parser.add_argument("--start_date", type=str, help="开始日期 YYYY-MM-DD（eltdx）")
     parser.add_argument("--end_date", type=str, help="结束日期 YYYY-MM-DD（eltdx）")
     parser.add_argument("--freq", type=str, default="day", help="分析周期（1m/5m/.../day/week/month 或中文）")
-    parser.add_argument("--count", type=int, default=800, help="eltdx 拉取 K 线数量")
+    parser.add_argument("--count", type=int, default=800,
+                        help="eltdx 拉取 K 线总数（超过 800 自动分页）")
+    parser.add_argument("--page-size", type=int, default=_ELTDX_KLINE_PAGE_SIZE,
+                        help="eltdx 单页数量（1~800，默认 800）")
+    parser.add_argument("--max-pages", type=int, default=_ELTDX_DEFAULT_MAX_PAGES,
+                        help="eltdx 最大分页次数（默认 200）")
+    parser.add_argument("--adjust", type=str, default=_ELTDX_DEFAULT_ADJUST,
+                        choices=list(_ELTDX_ADJUST_CHOICES),
+                        help="eltdx 复权模式（默认 qfq 前复权；可选 none/hfq/fixed_qfq/fixed_hfq）")
+    parser.add_argument("--anchor-date", "--anchor_date", dest="anchor_date", type=str,
+                        help="定点复权锚定日期 YYYY-MM-DD（fixed_qfq/fixed_hfq 必填）")
     parser.add_argument("--json", action="store_true", help="输出结构化 JSON")
     parser.add_argument("--output", type=str, help="输出文件路径")
     parser.add_argument("--cal_indicators", action="store_true", default=True,
@@ -893,10 +1731,13 @@ def main():
 
     # 加载数据（多周期：目标周期 + 上一级周期，用于跨级别共振判断）
     if args.source == "csv":
-        if not args.input:
-            print("错误：csv 模式需要 --input", file=sys.stderr)
+        if args.input_periods:
+            data_by_period = load_csv_periods(args.input_periods)
+        elif args.input:
+            data_by_period = {freq_seconds: load_csv_data(args.input)}
+        else:
+            print("错误：csv 模式需要 --input 或 --input_periods", file=sys.stderr)
             sys.exit(1)
-        data_by_period = {freq_seconds: load_csv_data(args.input)}
     else:
         if not args.code:
             print("错误：eltdx 模式需要 --code", file=sys.stderr)
@@ -905,7 +1746,17 @@ def main():
         up = upper_period(freq_seconds)
         for p in sorted({freq_seconds, up}):
             pname = seconds_to_name(p)
-            rows = load_eltdx_data(args.code, pname, args.start_date, args.end_date, args.count)
+            rows = load_eltdx_data(
+                args.code,
+                pname,
+                args.start_date,
+                args.end_date,
+                args.count,
+                args.page_size,
+                args.max_pages,
+                args.adjust,
+                args.anchor_date,
+            )
             if len(rows) >= 2:
                 data_by_period[p] = rows
 
@@ -940,6 +1791,11 @@ def main():
     symbol = args.symbol or (args.code if args.source == "eltdx" else "000001")
     try:
         result = analyze(symbol, data_by_period, config)
+        result["data_source"] = {
+            "source": args.source,
+            "复权模式": args.adjust if args.source == "eltdx" else "csv原样",
+            "anchor_date": args.anchor_date if args.source == "eltdx" else None,
+        }
     except ValueError as e:
         print(f"错误：{e}", file=sys.stderr)
         sys.exit(1)
