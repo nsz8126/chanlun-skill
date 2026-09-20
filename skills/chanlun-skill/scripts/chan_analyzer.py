@@ -1292,6 +1292,55 @@ def _resonance(periods_detail: dict) -> list:
     return events
 
 
+def _structure_alignment(periods_detail: dict) -> list:
+    """Map adjacent-period current segments by time range and direction only.
+
+    This is a Skill-layer audit mapping; the Rust core computes each observer
+    independently and does not assert cross-period segment identity.
+    """
+
+    names = list(periods_detail.keys())
+    alignments = []
+
+    def _ts(value):
+        try:
+            return int(datetime.strptime(value, "%Y-%m-%d %H:%M").replace(
+                tzinfo=timezone.utc
+            ).timestamp())
+        except (ValueError, TypeError, OSError):
+            return 0
+
+    for index in range(len(names) - 1):
+        lower_name, upper_name = names[index], names[index + 1]
+        lower = periods_detail[lower_name].get("当前线段")
+        upper = periods_detail[upper_name].get("当前线段")
+        if not lower or not upper:
+            continue
+        lower_start, lower_end = _ts(lower.get("起点")), _ts(lower.get("终点"))
+        upper_start, upper_end = _ts(upper.get("起点")), _ts(upper.get("终点"))
+        overlap_start = max(lower_start, upper_start)
+        overlap_end = min(lower_end, upper_end)
+        if not overlap_start or overlap_end < overlap_start:
+            relation = "无时间重叠"
+        elif lower_start >= upper_start and lower_end <= upper_end:
+            relation = "低周期时间覆盖"
+        else:
+            relation = "时间交叠"
+        if lower.get("方向") == upper.get("方向"):
+            relation += "/同向"
+        else:
+            relation += "/方向不同"
+        alignments.append({
+            "低周期": lower_name,
+            "高周期": upper_name,
+            "关系": relation,
+            "低周期线段": lower,
+            "高周期线段": upper,
+            "说明": "时间与方向映射，不代表 Rust 核心建立了线段身份对应",
+        })
+    return alignments
+
+
 def _multi_level_detail(obs: 观察者) -> dict:
     """扩展级别深度展开：把 `扩展线段序列组` / `扩展中枢序列组` 逐层结构展开。
 
@@ -1541,6 +1590,7 @@ def analyze(symbol: str, data_by_period: dict, config: 缠论配置 = None) -> d
 
     # 跨周期共振（审计 Stage 3-15）
     result["跨周期共振"] = _resonance(result["periods_detail"])
+    result["周期结构对齐"] = _structure_alignment(result["periods_detail"])
     return result
 
 

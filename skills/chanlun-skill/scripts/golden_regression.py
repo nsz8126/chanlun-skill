@@ -75,6 +75,7 @@ class _Observer:
 def main() -> int:
     base = run_fixture("test_data.csv")
     assert base["schema_version"] == "2.0"
+    assert "周期结构对齐" in base
     detail = base["periods_detail"]["day"]
     assert "走势判据" in detail
     assert "全局走势" in detail
