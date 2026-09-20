@@ -77,6 +77,8 @@ def main() -> int:
     assert base["schema_version"] == "2.0"
     detail = base["periods_detail"]["day"]
     assert "走势判据" in detail
+    assert "全局走势" in detail
+    assert "当前线段结构" in detail
     assert "核心买卖点信息" in detail
     assert detail["核心买卖点信息"]["匹配API"]
     assert all("标准信号" in d for d in base["periods_detail"].values())

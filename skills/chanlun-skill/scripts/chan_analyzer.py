@@ -412,6 +412,36 @@ def _segment_internal_pen_hubs(obs: 观察者) -> list:
     return [z for _, z in _segment_internal_pen_hub_items(obs)]
 
 
+def _segment_structure_context(obs: 观察者, segment) -> dict:
+    """Describe the latest segment's local hub movement separately from global trend."""
+
+    hubs = list(getattr(segment, "合_中枢序列", []) or []) if segment else []
+    relations = []
+    for index in range(max(0, len(hubs) - 1)):
+        previous, current = hubs[index], hubs[index + 1]
+        if current.低 > previous.高:
+            relation = "上移"
+        elif current.高 < previous.低:
+            relation = "下移"
+        else:
+            relation = "接触/重叠"
+        relations.append({
+            "前中枢": getattr(previous, "序号", index),
+            "后中枢": getattr(current, "序号", index + 1),
+            "关系": relation,
+            "前区间": {"ZD": previous.低, "ZG": previous.高},
+            "后区间": {"ZD": current.低, "ZG": current.高},
+        })
+    return {
+        "线段方向": _dir_name(getattr(segment, "方向", None)) if segment else None,
+        "中枢数量": len(hubs),
+        "相邻中枢关系": relations,
+        "局部方向": (
+            relations[-1]["关系"] if relations else "中枢关系不足"
+        ),
+    }
+
+
 def _trend_analysis(obs: 观察者) -> dict:
     """Analyze trend type using segment-internal pen hubs.
 
@@ -1410,6 +1440,7 @@ def analyze(symbol: str, data_by_period: dict, config: 缠论配置 = None) -> d
         internal_hubs = [z for _, z in internal_hub_items]
         latest_hub = internal_hubs[-1] if internal_hubs else None
         trend_info = _trend_analysis(obs)
+        local_structure = _segment_structure_context(obs, latest_line)
         detail = {
             "普通K线": len(obs.普通K线序列),
             "缠论K线": len(obs.缠论K线序列),
@@ -1430,6 +1461,12 @@ def analyze(symbol: str, data_by_period: dict, config: 缠论配置 = None) -> d
         detail["走势类型"] = trend_info["类型"]
         detail["走势方向"] = trend_info["方向"]
         detail["走势判据"] = trend_info
+        detail["全局走势"] = {
+            "类型": trend_info["类型"],
+            "方向": trend_info["方向"],
+            "判据": trend_info,
+        }
+        detail["当前线段结构"] = local_structure
         detail["当前线段"] = (
             {"序号": latest_line.序号, "方向": _dir_name(latest_line.方向),
              "高": latest_line.高, "低": latest_line.低,
