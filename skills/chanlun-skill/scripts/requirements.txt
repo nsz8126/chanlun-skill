@@ -1,3 +1,3 @@
-chanlun @ git+https://github.com/nsz8126/chanlun.rs.git@09c328ffc943f45be0cf3861623f93436489f4d3#subdirectory=chanlun-py
+chanlun @ https://github.com/nsz8126/chanlun.rs/releases/download/v26.6.73-fix/chanlun-2606.73-cp314-cp314-win_amd64.whl
 eltdx==3.2.2
 PyYAML==6.0.3
