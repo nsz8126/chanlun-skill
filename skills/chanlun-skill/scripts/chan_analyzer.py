@@ -1630,11 +1630,7 @@ def analyze(symbol: str, data_by_period: dict, config: 缠论配置 = None) -> d
         }
         detail["当前线段结构"] = local_structure
         detail["当前线段"] = (
-            {"序号": latest_line.序号, "方向": _dir_name(latest_line.方向),
-             "高": latest_line.高, "低": latest_line.低,
-             "起点": _fmt_ts(latest_line.文.时间戳),
-             "终点": _fmt_ts(latest_line.武.时间戳)}
-            if latest_line else None
+            _segment_detail(latest_line) if latest_line else None
         )
         detail["当前中枢"] = (
             _hub_detail(latest_hub)
