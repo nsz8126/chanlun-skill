@@ -572,6 +572,21 @@ def _hub_status(z) -> str:
         return ""
 
 
+def _hub_completeness(z) -> dict:
+    """Expose Rust hub completeness separately for real/virtual/combined views."""
+
+    method = getattr(z, "完整性", None)
+    if not callable(method):
+        return {mode: None for mode in ("实", "虚", "合")}
+    result = {}
+    for mode in ("实", "虚", "合"):
+        try:
+            result[mode] = bool(method(mode))
+        except BaseException:
+            result[mode] = None
+    return result
+
+
 def _hub_base_stroke_ids(z) -> list:
     base = getattr(z, "基础序列", None)
     if base is None:
@@ -613,6 +628,7 @@ def _hub_detail(z, seg=None) -> dict:
         "状态": _hub_status(z),
         "已形成有效": _formed_valid_hub(z),
         "核心完整性_实": _hub_core_completeness(z),
+        "完整性": _hub_completeness(z),
     }
     if seg is not None:
         row["所属线段"] = getattr(seg, "序号", None)
