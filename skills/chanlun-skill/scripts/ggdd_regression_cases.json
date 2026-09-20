@@ -1,0 +1,92 @@
+[
+  {
+    "code": "603606",
+    "freq": "day",
+    "count": 1500,
+    "expected_source": "segment",
+    "zd": 37.5,
+    "zg": 42.68,
+    "dd": 37.32,
+    "gg": 44.25
+  },
+  {
+    "code": "001378",
+    "freq": "week",
+    "count": 2000,
+    "expected_source": "pen",
+    "zd": 15.55,
+    "zg": 22.08,
+    "dd": 13.69,
+    "gg": 24.64
+  },
+  {
+    "code": "002812",
+    "freq": "week",
+    "count": 2000,
+    "expected_source": "segment",
+    "zd": 28.69,
+    "zg": 35.45,
+    "dd": 25.87,
+    "gg": 42.84
+  },
+  {
+    "code": "300442",
+    "freq": "week",
+    "count": 2000,
+    "expected_source": "segment",
+    "zd": 44.18,
+    "zg": 62.86,
+    "dd": 40.86,
+    "gg": 73.6
+  },
+  {
+    "code": "300442",
+    "freq": "month",
+    "count": 800,
+    "expected_source": "segment",
+    "zd": 17.74,
+    "zg": 31.41,
+    "dd": 14.17,
+    "gg": 39.99
+  },
+  {
+    "code": "002415",
+    "freq": "5m",
+    "count": 3000,
+    "expected_source": "segment",
+    "zd": 32.3,
+    "zg": 32.62,
+    "dd": 32.21,
+    "gg": 32.69
+  },
+  {
+    "code": "000831",
+    "freq": "5m",
+    "count": 3000,
+    "expected_source": "segment",
+    "zd": 53.13,
+    "zg": 53.67,
+    "dd": 52.94,
+    "gg": 54.21
+  },
+  {
+    "code": "002364",
+    "freq": "5m",
+    "count": 3000,
+    "expected_source": "segment",
+    "zd": 35.59,
+    "zg": 35.99,
+    "dd": 35.42,
+    "gg": 36.5
+  },
+  {
+    "code": "600765",
+    "freq": "15m",
+    "count": 3000,
+    "expected_source": "segment",
+    "zd": 14.1,
+    "zg": 14.11,
+    "dd": 13.83,
+    "gg": 14.32
+  }
+]
