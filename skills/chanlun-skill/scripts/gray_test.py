@@ -264,6 +264,8 @@ def main():
         ml = det.get("多级别展开", {})
         has_seg = "扩展线段层" in ml and len(ml["扩展线段层"]) >= 1
         has_hub = "扩展中枢层" in ml and len(ml["扩展中枢层"]) >= 1
+        has_mixed_seg = "混合扩展线段层" in ml
+        has_mixed_hub = "混合扩展中枢层" in ml
         # 至少 L1 应有数量
         l1_count = ml.get("扩展线段层", [{}])[0].get("数量", 0) if has_seg else 0
         # 与 序列组 一致性
@@ -271,6 +273,12 @@ def main():
         consistent = l1_count == seq_group_count
         check("扩展线段层存在", has_seg)
         check("扩展中枢层存在", has_hub)
+        check("混合扩展线段层存在", has_mixed_seg)
+        check("混合扩展中枢层存在", has_mixed_hub)
+        if has_seg and ml["扩展线段层"][0].get("线段"):
+            segment_detail = ml["扩展线段层"][0]["线段"][0]
+            fine_fields = {"四象", "特征分型终结", "特征序列状态", "缺口"}
+            check("线段细粒度字段存在", fine_fields.issubset(segment_detail))
         check(f"L1 数量与序列组一致（{l1_count} vs {seq_group_count}）", consistent)
     else:
         check("多级别展开（无法运行）", False, head(txt))
@@ -291,9 +299,15 @@ def main():
             {86400: day_data, 604800: day_data, 2592000: day_data},
         )
         resonances = multi_result.get("跨周期共振", [])
+        alignments = multi_result.get("周期结构对齐", [])
         periods = multi_result.get("periods", [])
         check(f"多周期分析可运行（{len(periods)} 周期）", len(periods) >= 2)
         check(f"共振列表存在", isinstance(resonances, list))
+        check(f"结构对齐列表存在", isinstance(alignments, list))
+        if alignments:
+            alignment = alignments[0]
+            alignment_fields = {"端点对应", "价格包含", "说明"}
+            check("结构对齐审计字段完整", alignment_fields.issubset(alignment))
         # 严格一类结构可能使该样例没有信号；若有事件，强度必须满足
         # 至少两个周期同向这一契约。
         all_strong = all(ev.get("strength", 0) >= 2 for ev in resonances)
