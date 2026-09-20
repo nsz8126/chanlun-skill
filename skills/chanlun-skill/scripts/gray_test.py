@@ -245,11 +245,14 @@ def main():
             )
             check(f"止损字段存在（{len(sigs)} 个信号）", has_stop)
             check(f"止损字段非空（至少 1 个）", any_nonempty)
-            # 验证：止损 6 个标准字段都存在
-            required = {"破位值", "失效K线", "有效性", "失效偏移",
-                        "与MACD柱子匹配", "与MACD柱子分型匹配"}
+            # 验证：买卖点 factory 的审计字段都存在
+            required = {
+                "类型", "备注", "结构", "偏移", "破位值", "失效K线",
+                "终结K线", "有效性", "失效偏移", "与MACD柱子匹配",
+                "与RSI匹配", "与KDJ匹配", "与MACD柱子分型匹配",
+            }
             all_keys = all(required.issubset(s["止损"].keys()) for s in sigs)
-            check(f"止损 6 字段齐全", all_keys)
+            check(f"止损 factory 字段齐全", all_keys)
     else:
         check("止损体系（无法运行）", False, head(txt))
 
