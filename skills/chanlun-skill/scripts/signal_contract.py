@@ -1,8 +1,7 @@
-"""Canonical signal contract for Rust-derived Chan analysis results.
+"""Canonical contract for Skill-classified Chan structure candidates.
 
-This module owns normalization and the small, explicit confirmation state
-machine used by the Skill.  It deliberately does not infer confirmation from
-the mere fact that a Rust factory currently reports a signal as valid.
+This module owns the explicit state machine for structure candidates. Signal
+state is determined only by the Skill's Chan-structure validity result.
 """
 
 from typing import Optional
@@ -14,7 +13,7 @@ TERMINAL_CONFIRMATION_STATES = frozenset({"已失效"})
 
 def _requested_state(raw: dict) -> str:
     """Read the state without upgrading an ordinary live signal."""
-    state = raw.get("确认状态", raw.get("确认级别", "候选"))
+    state = raw.get("确认状态", raw.get("结构有效性", raw.get("确认级别", "候选")))
     return state if state in VALID_CONFIRMATION_STATES else "候选"
 
 
@@ -22,13 +21,10 @@ def derive_signal_state(raw: dict) -> tuple[str, str]:
     """Derive a canonical state and a deterministic reason.
 
     A signal remains ``候选`` unless its producer explicitly marks it
-    ``已确认``.  A false stop-loss validity always dominates and invalidates
-    the signal.  This is intentionally conservative for batch historical
-    analysis, where future candles are not available for confirmation.
+    ``已确认`` or ``已失效`` using a structural rule. This is intentionally
+    conservative for batch historical analysis, where future candles are not
+    available for structural confirmation or invalidation.
     """
-    stop = raw.get("止损") or {}
-    if stop.get("有效性") is False:
-        return "已失效", "核心止损工厂判定失效"
     requested = _requested_state(raw)
     if requested == "已确认":
         return "已确认", "上游明确提供确认状态"
@@ -63,10 +59,6 @@ def transition_signal_state(
     trail = signal.setdefault("状态轨迹", [])
     if not trail or trail[-1].get("状态") != new_state:
         trail.append({"状态": new_state, "原因": reason or "状态更新"})
-    signal["可执行"] = (
-        new_state == "已确认"
-        and (signal.get("证据") or {}).get("止损", {}).get("有效性", True) is not False
-    )
     return signal
 
 
@@ -77,13 +69,9 @@ def normalize_signal(raw: dict, period: str, trend: Optional[dict] = None) -> di
     direction = raw.get("direction")
     if direction not in ("买", "卖"):
         direction = "买" if "买" in kind else "卖" if "卖" in kind else "未知"
-    stop = raw.get("止损") or {}
-    core_match = raw.get("核心匹配") or {}
     evidence = {
         "核心判据": raw.get("核心判据") or {},
-        "核心匹配": core_match,
         "背驰": raw.get("背驰证据") or {},
-        "止损": stop,
     }
     state, state_reason = derive_signal_state(raw)
     normalized = {
@@ -96,16 +84,16 @@ def normalize_signal(raw: dict, period: str, trend: Optional[dict] = None) -> di
         "状态轨迹": [{"状态": state, "原因": state_reason}],
         "结构来源": raw.get("结构来源", "rust_core"),
         "分类来源": raw.get("类型来源", "skill_classifier"),
-        "止损来源": raw.get("止损来源", "rust_factory"),
-        "置信度": raw.get("置信度", "未知"),
         "时间": raw.get("time"),
         "序号": raw.get("index"),
         "高": raw.get("high"),
         "低": raw.get("low"),
-        "破位值": raw.get("break"),
+        "结构失效边界": raw.get("结构失效边界"),
+        "结构失效条件": raw.get("结构失效条件"),
+        "结构有效性": raw.get("结构有效性", state),
+        "结构有效性依据": raw.get("结构有效性依据"),
         "证据": evidence,
         "理由": raw.get("reason", ""),
-        "可执行": state == "已确认" and stop.get("有效性", True) is not False,
         "走势上下文": {
             "类型": (trend or {}).get("类型"),
             "方向": (trend or {}).get("方向"),

@@ -9,13 +9,19 @@ chan_analyzer.py, covering both segment-internal and pen-hub fallback scopes.
 
 import json
 from pathlib import Path
+import sys
+
+SKILL_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_DIR = SKILL_ROOT / "scripts"
+FIXTURES_DIR = SKILL_ROOT / "tests" / "fixtures"
+sys.path.insert(0, str(RUNTIME_DIR))
 
 import chan_analyzer as analyzer
-from chanlun import 缠论配置, 立体分析器
+from chanlun import 缠论配置
+from rust_adapter import create_observer
 
 
-HERE = Path(__file__).resolve().parent
-CASES = HERE / "ggdd_regression_cases.json"
+CASES = FIXTURES_DIR / "ggdd_regression_cases.json"
 SECONDS = {
     "5m": 300,
     "15m": 900,
@@ -25,13 +31,6 @@ SECONDS = {
     "week": 604800,
     "month": 2592000,
 }
-UPPER = {
-    300: 1800,
-    900: 3600,
-    86400: 604800,
-    604800: 2592000,
-    2592000: 604800,
-}
 TOLERANCE = 1e-6
 
 
@@ -40,8 +39,7 @@ def _observer(code: str, freq: str, count: int):
     rows = analyzer.load_eltdx_data(
         code, freq, count=count, page_size=800, max_pages=10, adjust="qfq"
     )
-    engine = 立体分析器(code, [seconds, UPPER[seconds]], 缠论配置.不推送())
-    observer = analyzer.get_observer(engine, seconds)
+    observer = create_observer(code, seconds, 缠论配置.不推送())
     for index, row in enumerate(rows):
         analyzer.append_raw_kline(
             observer, code, analyzer._parse_date(row["date"], index), row, index, seconds

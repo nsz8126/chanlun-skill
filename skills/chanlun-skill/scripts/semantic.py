@@ -11,12 +11,8 @@ def _signal(signal: dict, canonical: str, legacy: str, default=None):
     return signal.get(canonical, signal.get(legacy, default))
 
 
-def _signal_stop(signal: dict) -> dict:
-    return signal.get("证据", {}).get("止损") or signal.get("止损") or {}
-
-
 def build_period_summary(detail: dict, quality: Optional[dict] = None) -> dict:
-    """Build facts, interpretations and conditional scenarios.
+    """Build facts and theory interpretations from extracted structures.
 
     This layer does not recalculate Chan theory structures.  It only explains
     the already extracted Rust facts and labels heuristic classifications as
@@ -87,40 +83,6 @@ def build_period_summary(detail: dict, quality: Optional[dict] = None) -> dict:
             "确定性": "当前数据范围内",
         })
 
-    scenarios = []
-    if latest_signal:
-        signal_type = _signal(latest_signal, "类型", "kind")
-        break_value = _signal(latest_signal, "破位值", "break")
-        scenarios.append({
-            "名称": "主情景",
-            "触发": f"价格按{signal_type}方向继续并满足后续确认",
-            "动作": "等待确认后再考虑入场或持有",
-            "入场条件": f"确认{signal_type}方向，并出现后续K线确认",
-            "确认条件": "不以单根K线或未完成结构作为确认",
-            "止损": _signal_stop(latest_signal),
-            "失效": f"触发价/破位值={break_value}",
-            "来源": latest_signal.get(
-                "结构来源", latest_signal.get("来源", "rust_core+skill_classifier")
-            ),
-        })
-        scenarios.append({
-            "名称": "备选情景",
-            "触发": "价格反向突破信号失效位",
-            "动作": "取消该信号，重新按当前中枢和线段分析",
-            "入场条件": "无",
-            "确认条件": "等待新的核心结构信号",
-            "止损": None,
-            "失效": "不把未确认信号当作确定趋势",
-            "来源": "skill_strategy_template",
-        })
-    else:
-        scenarios.append({
-            "名称": "观望情景",
-            "触发": "等待新的线段完成、背驰确认或买卖点出现",
-            "动作": "不基于当前数据强行预测",
-            "失效": "出现新的核心结构事实后重新分析",
-        })
-
     return {
         "走势类型": trend,
         "走势方向": trend_direction,
@@ -129,7 +91,6 @@ def build_period_summary(detail: dict, quality: Optional[dict] = None) -> dict:
         "当前中枢": current_hub,
         "事实": facts,
         "解释": interpretations,
-        "情景": scenarios,
         "数据质量": quality or {},
     }
 

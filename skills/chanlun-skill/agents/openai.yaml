@@ -1,6 +1,6 @@
 name: chanlun-skill
 description: 基于 chanlun 库的 A 股缠论分析技能，支持多周期结构分析、买卖点识别、背驰检测与技术指标。
-version: 3.9.0
+version: 4.1.0
 author: chanlun.rs
 
 capabilities:
@@ -17,10 +17,9 @@ capabilities:
   - golden_regression
   - technical_indicators
   - cross_period_resonance
-  - stop_loss_factory
   - multi_level_expansion
   - data_quality_validation
-  - semantic_strategy_summary
+  - semantic_theory_summary
   - csv_multi_period_input
   - eltdx_pagination
   - eltdx_adjustment_mode
@@ -53,7 +52,7 @@ usage:
         description: 标的标识，如 000001, sh600519
       freq:
         type: string
-        description: 分析周期（自动补上级周期形成周期组）
+        description: 分析周期；每个输入周期独立分析，跨周期需提供各周期数据
         enum: ["1m", "5m", "15m", "30m", "60m", "day", "week", "month"]
       source:
         type: string

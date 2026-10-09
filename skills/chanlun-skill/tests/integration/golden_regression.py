@@ -6,17 +6,22 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+
+SKILL_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_DIR = SKILL_ROOT / "scripts"
+FIXTURES_DIR = SKILL_ROOT / "tests" / "fixtures"
+sys.path.insert(0, str(RUNTIME_DIR))
 
 import chan_analyzer as analyzer
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(HERE, "chan_analyzer.py")
+SCRIPT = RUNTIME_DIR / "chan_analyzer.py"
 
 
 def run_fixture(name: str) -> dict:
-    path = os.path.join(HERE, name)
+    path = FIXTURES_DIR / name
     result = subprocess.run(
-        [sys.executable, "-X", "utf8", SCRIPT,
+        [sys.executable, "-X", "utf8", str(SCRIPT),
          "--source", "csv", "--input", path, "--symbol", "000001",
          "--freq", "day", "--json"],
         capture_output=True,
@@ -73,9 +78,16 @@ class _Observer:
 
 
 def main() -> int:
+    # Naive dates are UTC calendar labels; explicit offsets are normalized to UTC.
+    assert analyzer._parse_date("2026-01-02", 0) == analyzer._parse_date(
+        "2026-01-02T08:00:00+08:00", 0
+    )
+    assert analyzer._parse_date("2026-01-02T23:59:00+08:00", 0) + 60 == (
+        analyzer._parse_date("2026-01-03T00:00:00+08:00", 0)
+    )
+
     base = run_fixture("test_data.csv")
     assert base["schema_version"] == "2.0"
-    assert "周期结构对齐" in base
     detail = base["periods_detail"]["day"]
     assert "走势判据" in detail
     assert "全局走势" in detail
@@ -84,8 +96,6 @@ def main() -> int:
         "完整性" in hub
         for hub in detail.get("线段内部笔中枢", [])
     )
-    assert "核心买卖点信息" in detail
-    assert detail["核心买卖点信息"]["匹配API"]
     assert all("标准信号" in d for d in base["periods_detail"].values())
 
     trend = run_fixture("test_data_trend.csv")
@@ -149,12 +159,31 @@ def main() -> int:
 
     t3b = run_fixture("test_data_t3b.csv")
     assert any(
-        s["类型"].startswith("T3A")
+        s["类型"].startswith("T3B")
         for s in t3b["periods_detail"]["day"]["标准信号"]
+    )
+    t3b_signals = t3b["periods_detail"]["day"]["标准信号"]
+    assert any(
+        s["类型"] == "T3B买"
+        and s["结构有效性"] == "已确认"
+        and "未重新进入" in s["结构有效性依据"]
+        for s in t3b_signals
+    )
+    assert any(
+        s["类型"] == "T1P卖"
+        and s["结构有效性"] == "候选"
+        and "等待离开段后的反向笔" in s["结构有效性依据"]
+        for s in t3b_signals
     )
     t3a = run_fixture("test_data_t3a.csv")
     assert any(
         s["类型"].startswith("T3A")
+        for s in t3a["periods_detail"]["day"]["标准信号"]
+    )
+    assert any(
+        s["类型"] == "T1P买"
+        and s["结构有效性"] == "已确认"
+        and "重新进入前中枢（小转大）" in s["结构有效性依据"]
         for s in t3a["periods_detail"]["day"]["标准信号"]
     )
     print("golden regression passed")

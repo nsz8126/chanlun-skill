@@ -6,6 +6,7 @@ from typing import Optional
 
 
 def _timestamp(value):
+    """Parse timestamps as UTC instants; naive date/time strings are assumed UTC."""
     if value is None:
         return None
     if isinstance(value, (int, float)):
@@ -45,6 +46,7 @@ def inspect_rows(rows: list, period_seconds: Optional[int] = None) -> dict:
     duplicate_count = 0
     out_of_order = 0
     previous = None
+    seen_timestamps = set()
 
     for index, row in enumerate(rows):
         missing = [key for key in required if key not in row or row[key] in (None, "")]
@@ -79,10 +81,11 @@ def inspect_rows(rows: list, period_seconds: Optional[int] = None) -> dict:
             invalid_time_rows.append(index)
             issues.append({"类型": "时间无法解析", "行": index + 1,
                            "值": str(row.get("date"))})
-        elif previous is not None:
-            if ts == previous:
+        elif ts is not None:
+            if ts in seen_timestamps:
                 duplicate_count += 1
-            elif ts < previous:
+            seen_timestamps.add(ts)
+            if previous is not None and ts < previous:
                 out_of_order += 1
         if ts is not None:
             previous = ts

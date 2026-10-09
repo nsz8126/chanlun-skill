@@ -15,9 +15,11 @@ from datetime import datetime, timedelta
 import os
 import sys
 import types
+from pathlib import Path
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+SKILL_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_DIR = SKILL_ROOT / "scripts"
+sys.path.insert(0, str(RUNTIME_DIR))
 
 import chan_analyzer
 

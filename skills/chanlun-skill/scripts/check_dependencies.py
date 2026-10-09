@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REQ_FILE = ROOT / "requirements.txt"
 PYTHON_REQUIRED = (3, 14, 7)
-GIT_PACKAGE_VERSIONS = {"chanlun": "2606.73"}
+DIRECT_PACKAGE_VERSIONS = {"chanlun": "2606.73"}
 
 
 def read_requirements() -> dict[str, str]:
@@ -29,11 +29,11 @@ def read_requirements() -> dict[str, str]:
             requirements[match.group(1)] = match.group(2)
             continue
         direct = re.fullmatch(
-            r"([A-Za-z0-9_.-]+)\s*@\s*(git\+https://\S+)", line
+            r"([A-Za-z0-9_.-]+)\s*@\s*(?:git\+)?https://\S+", line
         )
         if direct:
             distribution = direct.group(1)
-            requirements[distribution] = GIT_PACKAGE_VERSIONS.get(distribution, "")
+            requirements[distribution] = DIRECT_PACKAGE_VERSIONS.get(distribution, "")
             continue
         raise ValueError(f"不支持的依赖格式: {line}")
     return requirements

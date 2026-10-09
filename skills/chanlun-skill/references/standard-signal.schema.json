@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "chanlun-skill standard signal",
+  "description": "Versioned, machine-readable contract for a normalized Chan-structure signal.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "周期",
+    "类型",
+    "方向",
+    "确认状态",
+    "结构来源",
+    "分类来源",
+    "证据",
+    "走势上下文",
+    "结构有效性",
+    "结构有效性依据"
+  ],
+  "properties": {
+    "schema_version": {"const": "signal-1.0"},
+    "周期": {"type": "string", "minLength": 1},
+    "类型": {
+      "enum": [
+        "T1买", "T1卖", "T1P买", "T1P卖", "T2买", "T2卖",
+        "T2S买", "T2S卖", "T3A买", "T3A卖", "T3B买", "T3B卖"
+      ]
+    },
+    "基础类型": {"type": ["string", "null"]},
+    "方向": {"enum": ["买", "卖", "未知"]},
+    "确认状态": {"$ref": "#/$defs/state"},
+    "确认级别": {"$ref": "#/$defs/state"},
+    "状态轨迹": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["状态"],
+        "properties": {
+          "状态": {"$ref": "#/$defs/state"},
+          "原因": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "结构来源": {"type": "string", "minLength": 1},
+    "分类来源": {"type": "string", "minLength": 1},
+    "时间": {"type": ["string", "null"]},
+    "序号": {"type": ["integer", "null"]},
+    "高": {"type": ["number", "null"]},
+    "低": {"type": ["number", "null"]},
+    "结构失效边界": {"type": ["number", "null"]},
+    "结构失效条件": {"type": ["string", "null"]},
+    "结构有效性": {"$ref": "#/$defs/state"},
+    "结构有效性依据": {"type": ["string", "null"]},
+    "证据": {"type": "object"},
+    "理由": {"type": "string"},
+    "走势上下文": {
+      "type": "object",
+      "properties": {
+        "类型": {"type": ["string", "null"]},
+        "方向": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"类型": {"pattern": "买$"}}, "required": ["类型"]},
+      "then": {"properties": {"方向": {"enum": ["买", "未知"]}}}
+    },
+    {
+      "if": {"properties": {"类型": {"pattern": "卖$"}}, "required": ["类型"]},
+      "then": {"properties": {"方向": {"enum": ["卖", "未知"]}}}
+    }
+  ],
+  "additionalProperties": true,
+  "$defs": {
+    "state": {"enum": ["候选", "已确认", "已失效"]}
+  }
+}

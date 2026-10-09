@@ -24,10 +24,10 @@ REQUIRED_FIELDS = (
     "确认状态",
     "结构来源",
     "分类来源",
-    "止损来源",
     "证据",
-    "可执行",
     "走势上下文",
+    "结构有效性",
+    "结构有效性依据",
 )
 
 
@@ -65,30 +65,17 @@ def validate_signal(signal: Any, index: Optional[int] = None) -> list[str]:
         errors.append(_error(f"确认状态非法: {signal.get('确认状态')!r}", index))
     if "确认级别" in signal and signal.get("确认级别") != signal.get("确认状态"):
         errors.append(_error("确认级别必须与确认状态一致", index))
-    for field in ("结构来源", "分类来源", "止损来源"):
+    if signal.get("结构有效性") not in VALID_CONFIRMATION_STATES:
+        errors.append(_error("结构有效性非法", index))
+    elif signal.get("结构有效性") != signal.get("确认状态"):
+        errors.append(_error("结构有效性必须与确认状态一致", index))
+    for field in ("结构来源", "分类来源"):
         if not isinstance(signal.get(field), str) or not signal.get(field):
             errors.append(_error(f"{field}必须是非空字符串", index))
     if not isinstance(signal.get("证据"), dict):
         errors.append(_error("证据必须是对象", index))
-    else:
-        stop = signal["证据"].get("止损")
-        if not isinstance(stop, dict):
-            errors.append(_error("证据.止损必须是对象", index))
     if not isinstance(signal.get("走势上下文"), dict):
         errors.append(_error("走势上下文必须是对象", index))
-    if not isinstance(signal.get("可执行"), bool):
-        errors.append(_error("可执行必须是布尔值", index))
-    else:
-        stop_valid = (signal.get("证据") or {}).get("止损", {}).get("有效性", True)
-        expected = signal.get("确认状态") == "已确认" and stop_valid is not False
-        if signal["可执行"] is not expected:
-            errors.append(
-                _error(
-                    "可执行与确认状态/止损有效性不一致"
-                    f"（期望 {expected}）",
-                    index,
-                )
-            )
     trail = signal.get("状态轨迹")
     if trail is not None:
         if not isinstance(trail, list) or not trail:

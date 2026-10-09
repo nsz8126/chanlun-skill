@@ -22,14 +22,14 @@ Claude Code/Codex 安装 Skill 时不会自动执行 `requirements.txt`。首次
 # 从 CSV 分析（内置样例数据）
 python skills/chanlun-skill/scripts/chan_analyzer.py \
     --source csv \
-    --input skills/chanlun-skill/scripts/test_data.csv \
+    --input skills/chanlun-skill/tests/fixtures/test_data.csv \
     --symbol 000001 \
     --freq 日线
 
 # 输出结构化 JSON
 python skills/chanlun-skill/scripts/chan_analyzer.py \
     --source csv \
-    --input skills/chanlun-skill/scripts/test_data.csv \
+    --input skills/chanlun-skill/tests/fixtures/test_data.csv \
     --symbol 000001 \
     --freq day \
     --json
@@ -42,7 +42,7 @@ python skills/chanlun-skill/scripts/chan_analyzer.py \
     --json
 ```
 
-`--freq` 支持中英文周期名（`1m`/`5m`/`30m`/`day`/`week`/`日线`/`周线`/`N分钟`），并自动补上级周期以合成多周期。
+`--freq` 支持中英文周期名（`1m`/`5m`/`30m`/`day`/`week`/`日线`/`周线`/`N分钟`）。CSV 多周期分析用 `--input_periods` 显式提供各周期数据；eltdx 路径会分别请求目标周期和上一级标准周期。各周期独立分析，不把单周期 K 线自动合成为上级周期。
 
 在线 `eltdx` 取数支持超过 800 根 K 线：`--count` 是总数量，取数层会自动分页，
 合并、去重、按时间排序后再交给 Rust 递归分析。例如：
@@ -62,7 +62,9 @@ python skills/chanlun-skill/scripts/chan_analyzer.py \
 
 ## 能力
 
-- **多周期**：`立体分析器` 自动由小周期合成大周期
+当前 Skill 版本：`4.1.0`。
+
+- **多周期**：各周期数据分别分析，并按信号时间窗口计算跨周期共振
 - **结构**：笔 / 线段内部笔中枢 / 线段 / 扩展结构全层级计数与端点；原始全局笔中枢仅作审计计数
 - **买卖点**：按缠论结构识别一/二/三类；一类遵循 `a+A+b+B+c` /
   `a+A+b`，A/B 统一取线段内部笔中枢，要求已形成且仍有效；
@@ -72,11 +74,10 @@ python skills/chanlun-skill/scripts/chan_analyzer.py \
 - **指标**：MACD / RSI / KDJ 逐根 K 线真实数值
 - **数据质量**：缺字段、非法数值、OHLC、时间、重复、乱序和大间隔检查
 - **复权口径**：eltdx 默认前复权 qfq，支持 none/hfq/fixed_qfq/fixed_hfq 并写入输出元数据
-- **语义摘要**：为 AI 输出事实、解释、条件化情景和失效条件
-- **证据来源拆分**：区分 Rust 结构、Skill 分类、Rust factory 止损和确认级别
-- **核心匹配审计**：保留配置/任意/全量/相对买卖点指标匹配结果
+- **语义摘要**：为 AI 输出事实、理论解释和结构失效条件
+- **证据来源拆分**：区分 Rust 结构事实、Skill 结构分类和确认状态
 - **回归验证**：16 个 PART 覆盖结构、信号来源、schema、策略输入契约与 eltdx 分页取数
-- **标准信号契约**：统一类型、确认状态、证据、来源、止损和可执行性；独立 schema 校验器
+- **标准信号契约**：统一类型、确认状态、结构证据、来源和结构失效边界；独立 schema 校验器
 - **确认状态机**：候选→已确认/已失效，已确认→已失效，保留状态轨迹并禁止已失效信号复活
 - **输出**：文本报告 + `--json` 结构化，JSON 包含 `schema_version` 和 Rust 引擎元数据
 
@@ -85,23 +86,31 @@ python skills/chanlun-skill/scripts/chan_analyzer.py \
 ```
 chanlun.rs/
 ├── skills/chanlun-skill/     # Skill 主体
-│   ├── SKILL.md              # 主文档（含核心库能力速查）
+│   ├── SKILL.md              # 主文档
 │   ├── agents/openai.yaml    # AI 配置
 │   ├── examples/             # 实战案例
 │   ├── references/           # 缠论理论参考
-│   └── scripts/              # 工具脚本
-│       ├── chan_analyzer.py  # 分析入口（直连核心库）
+│   ├── scripts/              # 运行时脚本
+│       ├── chan_analyzer.py  # 分析结果组装与兼容入口
+│       ├── cli.py            # 命令行参数、运行和输出编排
+│       ├── data_source.py    # 周期解析、CSV/eltdx 数据加载
+│       ├── report.py         # 文本报告渲染
+│       ├── multi_period.py   # 跨周期信号共振
+│       ├── structure.py      # 走势、中枢与结构事实辅助
+│       ├── analysis_output.py # 结构递归与指标事实序列化
+│       ├── divergence.py     # Rust 背驰证据提取
+│       ├── signal_classifier.py # T 系列结构信号分类
 │       ├── rust_adapter.py   # Rust/PyO3 访问适配层
 │       ├── data_quality.py   # 输入数据质量检查
-│       ├── semantic.py       # AI 语义摘要（事实/解释/情景）
+│       ├── semantic.py       # AI 语义摘要（事实/解释）
 │       ├── signal_contract.py # 标准信号契约与确认状态机
 │       ├── signal_schema.py   # 独立标准信号 schema 校验器
-│       ├── strategy_plan.py  # 无未来数据的策略计划
-│       ├── golden_regression.py # 黄金样例回归
-│       ├── test_contract.py  # 不依赖 Rust 扩展的轻量契约测试
-│       ├── test_data_loader.py # eltdx 分页取数层离线契约测试
-│       ├── test_data.csv     # 样例数据
 │       └── requirements.txt
+│   ├── references/standard-signal.schema.json # 下游可复用的 signal-1.0 JSON Schema
+│   └── tests/                # 测试资产
+│       ├── unit/             # 无 Rust 扩展的契约测试
+│       ├── integration/      # 黄金、灰度、数据加载与 GG/DD 回归
+│       └── fixtures/         # CSV 和 JSON 测试数据
 └── 核心库能力评估与Skill优化建议.md  # 审计报告
 ```
 
@@ -110,6 +119,7 @@ chanlun.rs/
 - [SKILL.md](skills/chanlun-skill/SKILL.md) - 完整使用文档
 - [缠论核心理论](skills/chanlun-skill/references/chan-theory-core.md) - 理论基础
 - [使用场景示例](skills/chanlun-skill/examples/usage-scenarios.md) - 实战案例
+- [测试目录说明](skills/chanlun-skill/tests/README.md) - 测试命令与 fixture 说明
 
 ## 许可证
 

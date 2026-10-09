@@ -8,35 +8,32 @@ depend on private Rust binding details.
 
 from chanlun import (
     K线,
-    立体分析器,
     缠论配置,
     观察者,
-    虚线,
     笔,
     线段,
     中枢,
     背驰分析,
-    买卖点,
 )
 
 
-def get_observer(engine: 立体分析器, period_seconds: int) -> 观察者:
-    """Return a period observer from the Rust multi-period engine.
+def create_observer(
+    symbol: str, period_seconds: int, config: 缠论配置 = None
+) -> 观察者:
+    """Create an independent observer for one real input period.
 
-    ``_单体分析器`` is currently the only way to access observers from the
-    binding.  Keeping that access here makes a future public API migration
-    local instead of spreading private-field usage through the analyzer.
+    The analyzer receives each period's own bars, so it does not need the
+    multi-period engine to synthesize bars or act as an observer container.
+    Copy the config to isolate per-period observer state.
     """
-
-    observers = getattr(engine, "_单体分析器", None)
-    if observers is None:
-        raise RuntimeError("chanlun Rust binding 未暴露周期观察者容器")
-    try:
-        return observers[period_seconds]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(
-            f"Rust 核心未找到周期 {period_seconds}s 的观察者"
-        ) from exc
+    source_config = config if config is not None else 缠论配置.不推送()
+    observer_config = source_config.model_copy(update={
+        "推送K线": False,
+        "推送笔": False,
+        "推送线段": False,
+        "图表展示": False,
+    })
+    return 观察者(symbol, period_seconds, observer_config)
 
 
 def append_raw_kline(
@@ -65,15 +62,12 @@ def append_raw_kline(
 
 __all__ = [
     "K线",
-    "立体分析器",
     "缠论配置",
     "观察者",
-    "虚线",
     "笔",
     "线段",
     "中枢",
     "背驰分析",
-    "买卖点",
-    "get_observer",
+    "create_observer",
     "append_raw_kline",
 ]
